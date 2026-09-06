@@ -1,0 +1,26 @@
+name: inherit
+version: 0.1.0
+summary: Discover ancestor skills; assess, inspect, and selectively adapt direct-parent changes.
+owner: Ruth
+status: active
+mode: lineage-awareness
+entrypoint: src/ruth/lineage/core.py
+capabilities:
+  resolve_lineage: src/ruth/lineage/core.py
+  refresh_inbox: src/ruth/lineage/core.py
+  inspect_candidates: src/ruth/lineage/core.py
+  mark_candidates: src/ruth/lineage/core.py
+permissions:
+  filesystem:
+    read:
+      - .agent/lineage.yaml
+      - .agent/lineage_inbox.json
+      - .ruth/lineage/inbox.json
+      - .ruth/lineage/assessment_queue.json
+    write:
+      - .ruth/lineage/inbox.json
+      - .ruth/lineage/assessment_queue.json
+  forge:
+    read_repo: true
+validation:
+  command: python3 -m unittest discover -s tests

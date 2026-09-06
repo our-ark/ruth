@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from ruth.memory.paths import atomic_write, now
+from ruth.paths import private_state_path
+from ruth.state import load_json_object
+
+
+SCHEMA_VERSION = 1
+
+
+def last_codex_input_path(root: Path | None = None) -> Path:
+    return private_state_path("last_codex_input.json", root)
+
+
+def record_last_codex_input(
+    prompt: str,
+    root: Path | None = None,
+    *,
+    sandbox: str,
+    persist_session: bool,
+    session_id: str,
+    resumed: bool,
+) -> None:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "recorded_at": now(),
+        "sandbox": sandbox,
+        "persist_session": persist_session,
+        "session_id": session_id,
+        "resumed": resumed,
+        "prompt": prompt,
+    }
+    atomic_write(last_codex_input_path(root), json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def last_codex_input_message(root: Path | None = None) -> str:
+    data = _load_last_codex_input(root)
+    if data is None:
+        return "No Codex input has been recorded yet."
+
+    prompt = str(data.get("prompt") or "")
+    lines = [
+        "Last Codex input:",
+        f"- recorded at: {data.get('recorded_at') or 'unknown'}",
+        f"- sandbox: {data.get('sandbox') or 'unknown'}",
+        f"- persistent session: {_yes_no(data.get('persist_session'))}",
+        f"- resumed session: {_yes_no(data.get('resumed'))}",
+    ]
+    session_id = str(data.get("session_id") or "").strip()
+    if session_id:
+        lines.append(f"- session id: {session_id}")
+    if data.get("resumed"):
+        lines.extend(
+            [
+                "",
+                "Note: this is the exact new input Ruth sent to Codex. The token count can also include Codex-managed context from the resumed session.",
+            ]
+        )
+    lines.extend(["", "Input payload:", "```text", prompt, "```"])
+    return "\n".join(lines)
+
+
+def _load_last_codex_input(root: Path | None = None) -> dict[str, Any] | None:
+    path = last_codex_input_path(root)
+    if not path.exists():
+        return None
+    return load_json_object(path)
+
+
+def _yes_no(value: object) -> str:
+    return "yes" if bool(value) else "no"

@@ -1,0 +1,784 @@
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+import json
+from pathlib import Path
+import re
+import threading
+from typing import Protocol
+from uuid import uuid4
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - fcntl is unavailable on Windows.
+    fcntl = None
+
+from ruth.memory.paths import clean_text, now as current_time
+from ruth.paths import artifact_path, artifact_read_paths
+
+
+SCHEMA_VERSION = 7
+EVOLVE_EVENT_TYPES = {
+    "checked",
+    "proposed",
+    "selected",
+    "queued",
+    "completed",
+    "failed",
+    "cancelled",
+    "paused",
+    "resumed",
+    "regressed",
+    "reverted",
+    "forward-fixed",
+    "no-action",
+    "skipped",
+    "removed",
+    "promoted",
+    "adopted",
+}
+EVOLVE_EVENT_ACTORS = {"human", "agent", "system"}
+EVOLVE_SOURCES = {
+    "feedback",
+    "experience",
+    "inheritance",
+    "learning",
+    "brainstorming",
+}
+LEGACY_EVOLVE_SOURCES = {"backlog"}
+RECOGNIZED_EVOLVE_SOURCES = EVOLVE_SOURCES | LEGACY_EVOLVE_SOURCES
+_CANDIDATE_EVENTS = {
+    "proposed",
+    "selected",
+    "queued",
+    "completed",
+    "failed",
+    "cancelled",
+    "paused",
+    "resumed",
+    "regressed",
+    "reverted",
+    "forward-fixed",
+    "no-action",
+    "removed",
+    "promoted",
+    "adopted",
+}
+PROPOSAL_DISPOSITION_EVENTS = {"selected", "removed", "no-action"}
+RECORDING_MODES = {"realtime", "backfill"}
+REMOVAL_CLASSIFICATIONS = {
+    "duplicate",
+    "superseded",
+    "obsolete",
+    "already-resolved",
+    "context-only",
+    "not-actionable",
+}
+_EVIDENCE_REF_PATTERNS = (
+    re.compile(r"evidence:evidence-[0-9a-f]{16}$"),
+    re.compile(r"task:[1-9]\d*$"),
+    re.compile(r"pr:https://[A-Za-z0-9.-]+/[^\s]+/(?:pull|pulls|merge_requests)/\d+/?$"),
+    re.compile(r"merge:[0-9a-fA-F]{7,64}$"),
+    re.compile(r"version:[A-Za-z0-9._-]{1,80}$"),
+)
+_EVOLVE_EVENT_THREAD_LOCK = threading.RLock()
+
+
+class CandidateLike(Protocol):
+    id: str
+    source: str
+    initiated_by: str
+    evidence_source: str
+    signal_actor: str
+    candidate_actor: str
+    parent_candidate_id: str
+    source_task_id: int | None
+    evidence_ids: tuple[str, ...]
+    score: int
+
+
+class RuntimeTaskLike(Protocol):
+    runtime_provider: str
+    runtime_session_id: str
+    runtime_completion_reason: str
+    runtime_usage: dict[str, int]
+    runtime_event_types: tuple[str, ...]
+    runtime_output_refs: tuple[str, ...]
+    runtime_side_effects: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class EvolveEvent:
+    id: str
+    occurred_at: str
+    event: str
+    event_actor: str
+    trigger: str
+    mode: str
+    theme: str
+    proposal_id: str = ""
+    curation_id: str = ""
+    recommendation_kind: str = ""
+    candidate_id: str = ""
+    task_id: int | None = None
+    source: str = ""
+    candidate_initiated_by: str = ""
+    evidence_source: str = ""
+    signal_actor: str = ""
+    candidate_actor: str = ""
+    approval_actor: str = ""
+    parent_candidate_id: str = ""
+    source_task_id: int | None = None
+    retry_of_task_id: int | None = None
+    score: int = 0
+    reason: str = ""
+    removal_classification: str = ""
+    evidence_refs: tuple[str, ...] = ()
+    review_id: str = ""
+    review_urls: tuple[str, ...] = ()
+    revision_id: str = ""
+    authoritative_revision_id: str = ""
+    authoritative_name: str = ""
+    promoted_at: str = ""
+    verified_at: str = ""
+    version: str = ""
+    health_check: str = ""
+    recording_mode: str = ""
+    runtime_provider: str = ""
+    runtime_session_id: str = ""
+    runtime_completion_reason: str = ""
+    runtime_usage: dict[str, int] = field(default_factory=dict)
+    runtime_event_types: tuple[str, ...] = ()
+    runtime_output_refs: tuple[str, ...] = ()
+    runtime_side_effects: tuple[str, ...] = ()
+
+    @property
+    def pr_url(self) -> str:
+        return self.review_urls[-1] if self.review_urls else ""
+
+    @property
+    def merge_commit(self) -> str:
+        return self.revision_id
+
+    @property
+    def authoritative_branch(self) -> str:
+        return self.authoritative_name
+
+
+def evolve_event_path(root: Path | None = None) -> Path:
+    return artifact_path("evolve_events.jsonl", root)
+
+
+def record_evolve_event(
+    event: str,
+    root: Path | None = None,
+    *,
+    event_actor: str,
+    trigger: str,
+    mode: str = "",
+    theme: str = "",
+    candidate: CandidateLike | None = None,
+    task_id: int | None = None,
+    approval_actor: str = "",
+    retry_of_task_id: int | None = None,
+    reason: str = "",
+    removal_classification: str = "",
+    evidence_refs: tuple[str, ...] = (),
+    proposal_id: str = "",
+    curation_id: str = "",
+    recommendation_kind: str = "",
+    review_id: str = "",
+    review_urls: tuple[str, ...] = (),
+    revision_id: str = "",
+    authoritative_revision_id: str = "",
+    authoritative_name: str = "",
+    promoted_at: str = "",
+    verified_at: str = "",
+    version: str = "",
+    health_check: str = "",
+    recording_mode: str = "",
+    runtime_task: RuntimeTaskLike | None = None,
+) -> EvolveEvent:
+    normalized_event = clean_text(event).lower()
+    normalized_actor = clean_text(event_actor).lower()
+    if normalized_event not in EVOLVE_EVENT_TYPES:
+        raise ValueError(
+            f"Evolve event must be one of: {', '.join(sorted(EVOLVE_EVENT_TYPES))}."
+        )
+    if normalized_actor not in EVOLVE_EVENT_ACTORS:
+        raise ValueError(
+            f"Evolve event actor must be one of: {', '.join(sorted(EVOLVE_EVENT_ACTORS))}."
+        )
+    candidate_id = clean_text(str(getattr(candidate, "id", "") or ""))
+    source = clean_text(str(getattr(candidate, "source", "") or "")).lower()
+    initiated_by = clean_text(
+        str(getattr(candidate, "initiated_by", "") or "")
+    ).lower()
+    evidence_source = clean_text(
+        str(getattr(candidate, "evidence_source", "") or source)
+    ).lower()
+    signal_actor = _actor(getattr(candidate, "signal_actor", ""))
+    candidate_actor = _actor(getattr(candidate, "candidate_actor", ""))
+    normalized_approval_actor = _actor(approval_actor)
+    parent_candidate_id = clean_text(
+        str(getattr(candidate, "parent_candidate_id", "") or "")
+    )
+    source_task_id = _positive_int(getattr(candidate, "source_task_id", None))
+    if candidate_id:
+        signal_actor = signal_actor or _legacy_signal_actor(evidence_source)
+        candidate_actor = candidate_actor or "agent"
+        if normalized_event in {"selected", "queued"} and not normalized_approval_actor:
+            normalized_approval_actor = _legacy_approval_actor(
+                clean_text(trigger),
+                normalized_actor,
+            )
+        initiated_by = (
+            candidate_actor
+            if candidate_actor in {"human", "agent"}
+            else initiated_by
+        )
+    if normalized_event in _CANDIDATE_EVENTS and not candidate_id:
+        raise ValueError(f"Evolve event {normalized_event} requires a candidate.")
+    if candidate_id and source not in RECOGNIZED_EVOLVE_SOURCES:
+        raise ValueError(
+            f"Evolve source must be one of: {', '.join(sorted(RECOGNIZED_EVOLVE_SOURCES))}."
+        )
+    if candidate_id and evidence_source not in RECOGNIZED_EVOLVE_SOURCES:
+        raise ValueError(
+            "Evolution evidence source must be one of: "
+            f"{', '.join(sorted(RECOGNIZED_EVOLVE_SOURCES))}."
+        )
+    if candidate_id and initiated_by not in {"human", "agent"}:
+        raise ValueError("Candidate initiator must be human or agent.")
+    if candidate_id and signal_actor not in EVOLVE_EVENT_ACTORS:
+        raise ValueError("Signal actor must be human, agent, or system.")
+    if candidate_id and candidate_actor not in EVOLVE_EVENT_ACTORS:
+        raise ValueError("Candidate actor must be human, agent, or system.")
+    if approval_actor and not normalized_approval_actor:
+        raise ValueError("Approval actor must be human, agent, or system.")
+    normalized_task_id = _positive_int(task_id)
+    normalized_removal_classification = clean_text(removal_classification).lower()
+    if (
+        normalized_removal_classification
+        and normalized_removal_classification not in REMOVAL_CLASSIFICATIONS
+    ):
+        raise ValueError("Unknown evolve candidate removal classification.")
+    if normalized_removal_classification and normalized_event != "removed":
+        raise ValueError("Removal classification is only valid for removed events.")
+    normalized_evidence_refs = _validated_evidence_refs(evidence_refs)
+    candidate_evidence_refs = _loaded_evidence_refs(
+        tuple(
+            f"evidence:{clean_text(str(evidence_id or ''))}"
+            for evidence_id in getattr(candidate, "evidence_ids", ())
+            if clean_text(str(evidence_id or ""))
+        )
+    )
+    normalized_evidence_refs = tuple(
+        dict.fromkeys((*normalized_evidence_refs, *candidate_evidence_refs))
+    )
+    normalized_proposal_id = clean_text(proposal_id)
+    if normalized_event == "proposed" and not normalized_proposal_id:
+        normalized_proposal_id = f"proposal-{uuid4().hex}"
+    if normalized_event == "no-action" and not normalized_proposal_id:
+        raise ValueError("Evolve event no-action requires a proposal id.")
+    if (
+        normalized_event
+        in {"queued", "completed", "failed", "cancelled", "regressed", "reverted", "forward-fixed"}
+        and normalized_task_id is None
+    ):
+        raise ValueError(f"Evolve event {normalized_event} requires a task id.")
+    normalized_recording_mode = clean_text(recording_mode).lower()
+    normalized_review_id = clean_text(review_id)
+    normalized_review_urls = _string_tuple(review_urls)
+    normalized_revision_id = clean_text(revision_id)
+    normalized_authoritative_revision_id = clean_text(authoritative_revision_id)
+    normalized_authoritative_name = clean_text(authoritative_name)
+    normalized_promoted_at = clean_text(promoted_at)
+    normalized_verified_at = clean_text(verified_at)
+    normalized_version = clean_text(version)
+    normalized_health_check = clean_text(health_check).lower()
+    if normalized_event in {"promoted", "adopted"}:
+        normalized_recording_mode = normalized_recording_mode or "realtime"
+        normalized_verified_at = normalized_verified_at or current_time()
+        if normalized_recording_mode not in RECORDING_MODES:
+            raise ValueError("Lifecycle recording mode must be realtime or backfill.")
+    if normalized_event == "promoted":
+        if normalized_actor != "human":
+            raise ValueError("Promoted evolution events require a human actor.")
+        if not all(
+            [
+                normalized_review_id,
+                normalized_revision_id,
+                normalized_authoritative_revision_id,
+                normalized_promoted_at,
+            ]
+        ):
+            raise ValueError(
+                "Promoted evolution events require review, landed revision, "
+                "authoritative revision, and promoted time."
+            )
+    if normalized_event == "adopted":
+        if not normalized_version or normalized_health_check != "passed":
+            raise ValueError(
+                "Adopted evolution events require a version and a passed health check."
+            )
+    evolve_event = EvolveEvent(
+        id=f"evolve-event-{uuid4().hex}",
+        occurred_at=current_time(),
+        event=normalized_event,
+        event_actor=normalized_actor,
+        trigger=clean_text(trigger),
+        mode=clean_text(mode).lower(),
+        theme=clean_text(theme),
+        proposal_id=normalized_proposal_id,
+        curation_id=clean_text(curation_id),
+        recommendation_kind=clean_text(recommendation_kind).lower(),
+        candidate_id=candidate_id,
+        task_id=normalized_task_id,
+        source=source,
+        candidate_initiated_by=initiated_by,
+        evidence_source=evidence_source,
+        signal_actor=signal_actor,
+        candidate_actor=candidate_actor,
+        approval_actor=normalized_approval_actor,
+        parent_candidate_id=parent_candidate_id,
+        source_task_id=source_task_id,
+        retry_of_task_id=_positive_int(retry_of_task_id),
+        score=_int(getattr(candidate, "score", 0)),
+        reason=_clip(clean_text(reason)),
+        removal_classification=normalized_removal_classification,
+        evidence_refs=normalized_evidence_refs,
+        review_id=normalized_review_id,
+        review_urls=normalized_review_urls,
+        revision_id=normalized_revision_id,
+        authoritative_revision_id=normalized_authoritative_revision_id,
+        authoritative_name=normalized_authoritative_name,
+        promoted_at=normalized_promoted_at,
+        verified_at=normalized_verified_at,
+        version=normalized_version,
+        health_check=normalized_health_check,
+        recording_mode=normalized_recording_mode,
+        runtime_provider=clean_text(
+            str(getattr(runtime_task, "runtime_provider", "") or "")
+        ).lower(),
+        runtime_session_id=clean_text(
+            str(getattr(runtime_task, "runtime_session_id", "") or "")
+        ),
+        runtime_completion_reason=clean_text(
+            str(getattr(runtime_task, "runtime_completion_reason", "") or "")
+        ).lower(),
+        runtime_usage=_runtime_usage(
+            getattr(runtime_task, "runtime_usage", {})
+        ),
+        runtime_event_types=_string_tuple(
+            getattr(runtime_task, "runtime_event_types", ())
+        ),
+        runtime_output_refs=_string_tuple(
+            getattr(runtime_task, "runtime_output_refs", ())
+        ),
+        runtime_side_effects=_string_tuple(
+            getattr(runtime_task, "runtime_side_effects", ())
+        ),
+    )
+    with _evolve_event_transaction(root):
+        path = evolve_event_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {"schema_version": SCHEMA_VERSION, **asdict(evolve_event)},
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+    return evolve_event
+
+
+def load_evolve_events(
+    root: Path | None = None,
+    *,
+    limit: int = 5000,
+    candidate_id: str = "",
+    task_id: int | None = None,
+    proposal_id: str = "",
+) -> tuple[EvolveEvent, ...]:
+    if limit <= 0:
+        return ()
+    wanted_candidate = clean_text(candidate_id).lower()
+    wanted_task = _positive_int(task_id)
+    wanted_proposal = clean_text(proposal_id)
+    lines: list[str] = []
+    for path in artifact_read_paths("evolve_events.jsonl", root):
+        try:
+            lines.extend(path.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            continue
+    events: list[EvolveEvent] = []
+    for line in reversed(lines):
+        event = _event_from_line(line)
+        if event is None:
+            continue
+        if wanted_candidate and event.candidate_id.lower() != wanted_candidate:
+            continue
+        if wanted_task is not None and event.task_id != wanted_task:
+            continue
+        if wanted_proposal and event.proposal_id != wanted_proposal:
+            continue
+        events.append(event)
+        if len(events) >= limit:
+            break
+    events.reverse()
+    return tuple(events)
+
+
+def load_open_proposals(root: Path | None = None) -> tuple[EvolveEvent, ...]:
+    proposed: dict[str, EvolveEvent] = {}
+    closed: set[str] = set()
+    for event in load_evolve_events(root):
+        if event.event == "proposed" and event.proposal_id:
+            proposed[event.proposal_id] = event
+        elif event.event in PROPOSAL_DISPOSITION_EVENTS and event.proposal_id:
+            closed.add(event.proposal_id)
+    return tuple(
+        event
+        for proposal_id, event in proposed.items()
+        if proposal_id not in closed
+        and not proposal_id.startswith("legacy-proposal-")
+    )
+
+
+def latest_open_proposal_id(
+    candidate_id: str,
+    root: Path | None = None,
+) -> str:
+    normalized_candidate_id = clean_text(candidate_id).lower()
+    for event in reversed(load_open_proposals(root)):
+        if event.candidate_id.lower() == normalized_candidate_id:
+            return event.proposal_id
+    return ""
+
+
+def linked_proposal_id(
+    root: Path | None = None,
+    *,
+    candidate_id: str = "",
+    task_id: int | None = None,
+) -> str:
+    normalized_candidate_id = clean_text(candidate_id).lower()
+    normalized_task_id = _positive_int(task_id)
+    for event in reversed(load_evolve_events(root)):
+        if not event.proposal_id:
+            continue
+        if normalized_task_id is not None and event.task_id == normalized_task_id:
+            return event.proposal_id
+        if normalized_candidate_id and event.candidate_id.lower() == normalized_candidate_id:
+            if event.event in {"selected", "queued"}:
+                return event.proposal_id
+    return ""
+
+
+def close_open_proposals(
+    root: Path | None = None,
+    *,
+    event_actor: str,
+    trigger: str,
+    reason: str,
+) -> tuple[EvolveEvent, ...]:
+    closed = []
+    for proposal in load_open_proposals(root):
+        closed.append(
+            record_evolve_event(
+                "no-action",
+                root,
+                event_actor=event_actor,
+                trigger=trigger,
+                mode=proposal.mode,
+                theme=proposal.theme,
+                candidate=_CandidateSnapshot(
+                    id=proposal.candidate_id,
+                    source=proposal.source,
+                    initiated_by=proposal.candidate_initiated_by,
+                    evidence_source=proposal.evidence_source,
+                    signal_actor=proposal.signal_actor,
+                    candidate_actor=proposal.candidate_actor,
+                    parent_candidate_id=proposal.parent_candidate_id,
+                    source_task_id=proposal.source_task_id,
+                    score=proposal.score,
+                ),
+                reason=reason,
+                proposal_id=proposal.proposal_id,
+                curation_id=proposal.curation_id,
+                recommendation_kind=proposal.recommendation_kind,
+            )
+        )
+    return tuple(closed)
+
+
+def _event_from_line(line: str) -> EvolveEvent | None:
+    try:
+        raw = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    event = clean_text(str(raw.get("event") or "")).lower()
+    actor = clean_text(str(raw.get("event_actor") or "")).lower()
+    candidate_id = clean_text(str(raw.get("candidate_id") or ""))
+    source = clean_text(str(raw.get("source") or "")).lower()
+    initiated_by = clean_text(str(raw.get("candidate_initiated_by") or "")).lower()
+    evidence_source = clean_text(str(raw.get("evidence_source") or source)).lower()
+    if evidence_source not in RECOGNIZED_EVOLVE_SOURCES:
+        evidence_source = source
+    signal_actor = _actor(raw.get("signal_actor"))
+    candidate_actor = _actor(raw.get("candidate_actor"))
+    approval_actor = _actor(raw.get("approval_actor"))
+    task_id = _positive_int(raw.get("task_id"))
+    if event not in EVOLVE_EVENT_TYPES or actor not in EVOLVE_EVENT_ACTORS:
+        return None
+    if event in _CANDIDATE_EVENTS and not candidate_id:
+        return None
+    if candidate_id and (
+        source not in RECOGNIZED_EVOLVE_SOURCES or initiated_by not in {"human", "agent"}
+    ):
+        return None
+    if candidate_id:
+        signal_actor = signal_actor or _legacy_signal_actor(evidence_source)
+        candidate_actor = candidate_actor or "agent"
+        if event in {"selected", "queued"} and not approval_actor:
+            approval_actor = _legacy_approval_actor(
+                clean_text(str(raw.get("trigger") or "")),
+                actor,
+            )
+    if event in {
+        "queued",
+        "completed",
+        "failed",
+        "cancelled",
+        "regressed",
+        "reverted",
+        "forward-fixed",
+    } and task_id is None:
+        return None
+    recording_mode = clean_text(str(raw.get("recording_mode") or "")).lower()
+    if event in {"promoted", "adopted"} and recording_mode not in RECORDING_MODES:
+        return None
+    schema_version = _int(raw.get("schema_version"))
+    review_id = clean_text(
+        str(raw.get("review_id") or raw.get("pr_url") or "")
+    )
+    review_urls = _string_tuple(raw.get("review_urls"))
+    legacy_pr_url = clean_text(str(raw.get("pr_url") or ""))
+    if legacy_pr_url and legacy_pr_url not in review_urls:
+        review_urls = (*review_urls, legacy_pr_url)
+    revision_id = clean_text(
+        str(raw.get("revision_id") or raw.get("merge_commit") or "")
+    )
+    authoritative_revision_id = clean_text(
+        str(raw.get("authoritative_revision_id") or "")
+    )
+    authoritative_name = clean_text(
+        str(raw.get("authoritative_name") or raw.get("authoritative_branch") or "")
+    )
+    if event == "promoted" and (
+        actor != "human"
+        or not review_id
+        or not revision_id
+        or (schema_version >= 7 and not authoritative_revision_id)
+        or (schema_version < 7 and not authoritative_name)
+        or not clean_text(str(raw.get("promoted_at") or ""))
+        or not clean_text(str(raw.get("verified_at") or ""))
+    ):
+        return None
+    if event == "adopted" and (
+        not clean_text(str(raw.get("version") or ""))
+        or clean_text(str(raw.get("health_check") or "")).lower() != "passed"
+        or not clean_text(str(raw.get("verified_at") or ""))
+    ):
+        return None
+    occurred_at = str(raw.get("occurred_at") or "")
+    event_id = clean_text(str(raw.get("id") or ""))
+    legacy_id = f"legacy-evolve-event-{event}-{candidate_id or task_id or occurred_at}"
+    proposal_id = clean_text(str(raw.get("proposal_id") or ""))
+    if event == "proposed" and not proposal_id:
+        proposal_id = f"legacy-proposal-{event_id or legacy_id}"
+    if event == "no-action" and not proposal_id:
+        return None
+    return EvolveEvent(
+        id=event_id or legacy_id,
+        occurred_at=occurred_at,
+        event=event,
+        event_actor=actor,
+        trigger=clean_text(str(raw.get("trigger") or "")),
+        mode=clean_text(str(raw.get("mode") or "")).lower(),
+        theme=clean_text(str(raw.get("theme") or "")),
+        proposal_id=proposal_id,
+        curation_id=clean_text(str(raw.get("curation_id") or "")),
+        recommendation_kind=clean_text(str(raw.get("recommendation_kind") or "")).lower(),
+        candidate_id=candidate_id,
+        task_id=task_id,
+        source=source,
+        candidate_initiated_by=initiated_by,
+        evidence_source=evidence_source,
+        signal_actor=signal_actor,
+        candidate_actor=candidate_actor,
+        approval_actor=approval_actor,
+        parent_candidate_id=clean_text(str(raw.get("parent_candidate_id") or "")),
+        source_task_id=_positive_int(raw.get("source_task_id")),
+        retry_of_task_id=_positive_int(raw.get("retry_of_task_id")),
+        score=_int(raw.get("score")),
+        reason=_clip(clean_text(str(raw.get("reason") or ""))),
+        removal_classification=_loaded_removal_classification(
+            raw.get("removal_classification")
+        ),
+        evidence_refs=_loaded_evidence_refs(raw.get("evidence_refs")),
+        review_id=review_id,
+        review_urls=review_urls,
+        revision_id=revision_id,
+        authoritative_revision_id=authoritative_revision_id,
+        authoritative_name=authoritative_name,
+        promoted_at=clean_text(str(raw.get("promoted_at") or "")),
+        verified_at=clean_text(str(raw.get("verified_at") or "")),
+        version=clean_text(str(raw.get("version") or "")),
+        health_check=clean_text(str(raw.get("health_check") or "")).lower(),
+        recording_mode=recording_mode,
+        runtime_provider=clean_text(
+            str(raw.get("runtime_provider") or "")
+        ).lower(),
+        runtime_session_id=clean_text(
+            str(raw.get("runtime_session_id") or "")
+        ),
+        runtime_completion_reason=clean_text(
+            str(raw.get("runtime_completion_reason") or "")
+        ).lower(),
+        runtime_usage=_runtime_usage(raw.get("runtime_usage")),
+        runtime_event_types=_string_tuple(raw.get("runtime_event_types")),
+        runtime_output_refs=_string_tuple(raw.get("runtime_output_refs")),
+        runtime_side_effects=_string_tuple(raw.get("runtime_side_effects")),
+    )
+
+
+@dataclass(frozen=True)
+class _CandidateSnapshot:
+    id: str
+    source: str
+    initiated_by: str
+    evidence_source: str
+    signal_actor: str
+    candidate_actor: str
+    parent_candidate_id: str
+    source_task_id: int | None
+    score: int
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _int(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _runtime_usage(value: object) -> dict[str, int]:
+    keys = (
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+    )
+    if not isinstance(value, dict) or not any(key in value for key in keys):
+        return {}
+    return {key: max(0, _int(value.get(key))) for key in keys}
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    seen: set[str] = set()
+    output: list[str] = []
+    for item in value:
+        cleaned = clean_text(str(item or ""))
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        output.append(cleaned)
+    return tuple(output)
+
+
+def _validated_evidence_refs(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Evolution evidence refs must be a list or tuple.")
+    refs = _loaded_evidence_refs(value)
+    if len(refs) != len(value):
+        raise ValueError("Evolution evidence refs contain a malformed or duplicate ref.")
+    return refs
+
+
+def _loaded_evidence_refs(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    output: list[str] = []
+    for item in value:
+        ref = clean_text(str(item or ""))
+        if (
+            ref
+            and ref not in output
+            and any(pattern.fullmatch(ref) for pattern in _EVIDENCE_REF_PATTERNS)
+        ):
+            output.append(ref)
+        if len(output) >= 64:
+            break
+    return tuple(output)
+
+
+def _loaded_removal_classification(value: object) -> str:
+    classification = clean_text(str(value or "")).lower()
+    return classification if classification in REMOVAL_CLASSIFICATIONS else ""
+
+
+def _actor(value: object) -> str:
+    actor = clean_text(str(value or "")).lower()
+    return actor if actor in EVOLVE_EVENT_ACTORS else ""
+
+
+def _legacy_signal_actor(source: str) -> str:
+    if source in {"backlog", "feedback", "learning"}:
+        return "human"
+    if source in {"inheritance", "brainstorming"}:
+        return "agent"
+    return "system"
+
+
+def _legacy_approval_actor(trigger: str, event_actor: str) -> str:
+    if trigger == "evolve-scheduler":
+        return "agent"
+    return event_actor
+
+
+def _clip(value: str, limit: int = 1000) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."
+
+
+@contextmanager
+def _evolve_event_transaction(root: Path | None = None):
+    path = evolve_event_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with _EVOLVE_EVENT_THREAD_LOCK:
+        with lock_path.open("a", encoding="utf-8") as lock_file:
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)

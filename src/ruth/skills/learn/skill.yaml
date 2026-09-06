@@ -1,0 +1,28 @@
+name: learn
+version: 0.3.0
+summary: Assess an immutable published skill snapshot and create a bounded evolution candidate when applicable.
+owner: Ruth
+catalog_implementation: shared-library
+catalog_library_owner: Ruth
+catalog_library_package: our-ark-skill-catalog
+catalog_library_contract: skill-catalog/v1
+catalog_library_commit: 946ff26f93bff3f6eefeb5deb81ca4db1127266f
+status: active
+mode: read-only-assessment
+entrypoint: src/ruth/learn.py
+permissions:
+  filesystem:
+    read:
+      - published_agent_skills
+      - ruth_software_body
+    write:
+      - .ruth/evolve_candidates.json
+  git:
+    status: true
+    diff: true
+    branch: false
+    commit: false
+    push: false
+    merge: false
+validation:
+  command: python3 -m unittest discover -s tests -t .

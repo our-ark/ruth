@@ -1,0 +1,952 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import textwrap
+import tomllib
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@unittest.skipUnless(
+    (ROOT / "libraries").is_dir() and (ROOT / ".github").is_dir(),
+    "repository release tests are outside the inheritable agent body",
+)
+class RuthPortableInstallTests(unittest.TestCase):
+    def test_ci_provisions_locked_build_backend_before_offline_wheel_test(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8"
+        )
+        install_command = (
+            "python -m pip install --disable-pip-version-check --require-hashes "
+            "-r .github/requirements/test-build.txt"
+        )
+        test_command = "python -m unittest discover -s tests"
+
+        self.assertIn(install_command, workflow)
+        self.assertLess(workflow.index(install_command), workflow.index(test_command))
+
+        requirements = (
+            ROOT / ".github" / "requirements" / "test-build.txt"
+        ).read_text(encoding="utf-8")
+        self.assertRegex(requirements, r"(?m)^setuptools==\d+\.\d+\.\d+ \\$\n")
+        self.assertRegex(requirements, r"--hash=sha256:[0-9a-f]{64}$")
+        locked_version = next(
+            line.split("==", 1)[1].split()[0]
+            for line in requirements.splitlines()
+            if line.startswith("setuptools==")
+        )
+        self.assertGreaterEqual(
+            tuple(int(part) for part in locked_version.split(".")),
+            (83, 0, 0),
+        )
+
+    def test_release_metadata_matches_project_version(self) -> None:
+        metadata = _project_metadata(ROOT / "pyproject.toml")
+        version = metadata["project"]["version"]
+        citation = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
+
+        self.assertIn(f"version: {version}", citation)
+        self.assertIn(f"/releases/tag/v{version}", citation)
+        self.assertTrue((ROOT / "docs" / "releases" / f"v{version}.md").is_file())
+
+    def test_reference_providers_share_the_core_contract_pin(self) -> None:
+        root_metadata = _project_metadata(ROOT / "pyproject.toml")
+        core_contract = _dependency(root_metadata["project"]["dependencies"], "our-ark-provider-kit")
+        manifest = _project_metadata(ROOT / "genesis.toml")
+        runtime_contracts = [
+            dependency["requirement"]
+            for dependency in manifest["runtime_dependencies"]
+            if dependency["name"] == "provider-kit"
+        ]
+        self.assertEqual(runtime_contracts, [core_contract])
+        for package in ("claude", "github", "launchd", "slack", "systemd", "telegram"):
+            metadata = _project_metadata(ROOT / "libraries" / package / "pyproject.toml")
+            provider_contract = _dependency(
+                metadata["project"]["dependencies"],
+                "our-ark-provider-kit",
+            )
+            self.assertEqual(provider_contract, core_contract, package)
+
+    def test_claude_provider_is_a_local_optional_runtime_dependency(self) -> None:
+        root_metadata = _project_metadata(ROOT / "pyproject.toml")
+        manifest = _project_metadata(ROOT / "genesis.toml")
+        dependency = next(
+            item
+            for item in manifest["runtime_dependencies"]
+            if item["name"] == "claude"
+        )
+
+        reference_requirement = _dependency(
+            root_metadata["project"]["optional-dependencies"]["reference"],
+            "our-ark-claude",
+        )
+        self.assertEqual(dependency["requirement"], reference_requirement)
+        self.assertIn("@d5d6eece19caa5933a1b60b564a126297c864ce8", reference_requirement)
+        self.assertEqual(dependency["import_name"], "our_ark_claude")
+        self.assertEqual(dependency["local_source"], "libraries/claude/src")
+        self.assertTrue(dependency["optional"])
+
+    def test_slack_runtime_dependencies_are_pinned_in_genesis_manifest(self) -> None:
+        manifest = _project_metadata(ROOT / "genesis.toml")
+        dependencies = {
+            dependency["name"]: dependency
+            for dependency in manifest["runtime_dependencies"]
+        }
+
+        self.assertEqual(dependencies["slack-sdk"]["requirement"], "slack-sdk==3.44.0")
+        self.assertEqual(
+            dependencies["websocket-client"]["requirement"],
+            "websocket-client==1.8.0",
+        )
+        self.assertEqual(dependencies["slack-sdk"]["when_provider"], "chat.slack")
+        self.assertEqual(
+            dependencies["websocket-client"]["when_provider"],
+            "chat.slack",
+        )
+
+    def test_wheel_install_completes_profile_task_with_independent_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            target = base / "site-packages"
+            wheels = base / "wheels"
+            chat_provider = base / "portable-chat"
+            vcs_provider = base / "portable-vcs"
+            profile_package = base / "portable-researcher-profile"
+            extension_package = base / "portable-notes-extension"
+            body = base / "body"
+            codex = base / "codex"
+            target.mkdir()
+            wheels.mkdir()
+            _write_chat_provider_package(chat_provider)
+            _write_vcs_provider_package(vcs_provider)
+            _write_profile_package(profile_package)
+            _write_extension_package(extension_package)
+            _write_fake_codex(codex)
+
+            for project in (
+                ROOT / "libraries" / "provider-kit",
+                ROOT / "libraries" / "skill-catalog",
+                ROOT,
+                chat_provider,
+                vcs_provider,
+                profile_package,
+                extension_package,
+            ):
+                built = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "pip",
+                        "wheel",
+                        "--quiet",
+                        "--disable-pip-version-check",
+                        "--no-deps",
+                        "--no-build-isolation",
+                        "--wheel-dir",
+                        str(wheels),
+                        str(project),
+                    ],
+                    cwd=base,
+                    env={**os.environ, "PIP_NO_INDEX": "1"},
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=120,
+                )
+                self.assertEqual(built.returncode, 0, built.stderr or built.stdout)
+
+            install = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--quiet",
+                    "--disable-pip-version-check",
+                    "--no-deps",
+                    "--no-build-isolation",
+                    "--target",
+                    str(target),
+                    *(str(path) for path in sorted(wheels.glob("*.whl"))),
+                ],
+                cwd=base,
+                env={**os.environ, "PIP_NO_INDEX": "1"},
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=120,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr or install.stdout)
+
+            environment = {
+                **os.environ,
+                "RUTH_CODEX_BIN": str(codex),
+                "RUTH_PYTHON": sys.executable,
+                "RUTH_TEST_COMMAND": f'{sys.executable} -c "pass"',
+                "PIP_NO_INDEX": "1",
+                "PYTHONPATH": str(target),
+                "PYTHONPYCACHEPREFIX": str(base / "pycache"),
+            }
+            completed = subprocess.run(
+                [sys.executable, "-c", _INSTALLED_TASK_SCRIPT, str(body)],
+                cwd=base,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=120,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+            result = json.loads(completed.stdout.strip().splitlines()[-1])
+
+        self.assertEqual(result["chat"], "portable-chat")
+        self.assertEqual(result["vcs"], "portable-vcs")
+        self.assertEqual(result["runtime"], "codex")
+        self.assertEqual(result["forge"], "local")
+        self.assertEqual(result["ruth_version"], "0.6.1")
+        self.assertEqual(
+            result["agent_identity_schema_id"],
+            "https://our-ark.github.io/schemas/ai-agent-identity.schema.json",
+        )
+        self.assertEqual(result["provider_kit_version"], "0.7.0")
+        self.assertEqual(result["chat_provider_version"], "0.0.1")
+        self.assertEqual(result["vcs_provider_version"], "0.0.1")
+        self.assertEqual(result["profile"], "researcher")
+        self.assertEqual(result["profile_version"], "0.0.1")
+        self.assertEqual(result["extension"], "notes")
+        self.assertEqual(result["extension_version"], "0.0.1")
+        self.assertEqual(result["extension_api_version"], 1)
+        self.assertEqual(result["composition_api_version"], 1)
+        self.assertEqual(result["composition"], "portable-descendant")
+        self.assertEqual(result["workflow_api_version"], 4)
+        self.assertEqual(result["conformance_api_version"], 1)
+        self.assertEqual(result["repository_contract_version"], 1)
+        self.assertEqual(result["review_contract_version"], 1)
+        self.assertEqual(
+            result["workflow_operations"],
+            [
+                "recover",
+                "enqueue",
+                "claim",
+                "finalize:completed",
+                "enqueue",
+                "finalize:completed",
+                "reconcile",
+            ],
+        )
+        self.assertTrue(result["workflow_state_isolated"])
+        self.assertEqual(result["profile_trigger"], "/research")
+        self.assertEqual(result["profile_context_source"], "profile:researcher")
+        self.assertIn("Queued portable research task #1", result["profile_command_reply"])
+        self.assertIn("Portable research:", result["profile_help"])
+        self.assertEqual(result["profile_timeout_seconds"], 180)
+        self.assertEqual(result["profile_max_attempts"], 1)
+        self.assertTrue(result["profile_task_label_applied"])
+        self.assertEqual(result["extension_trigger"], "/notes")
+        self.assertEqual(result["extension_context_source"], "extension:notes")
+        self.assertEqual(
+            result["extension_idempotency_key"],
+            "extension:notes:notes:portable-extension",
+        )
+        self.assertIn("/notes <topic>", result["extension_help"])
+        self.assertIn("Queued portable notes task #2", result["extension_reply"])
+        self.assertTrue(result["extension_state_namespaced"])
+        self.assertEqual(result["extension_last_event"], "completed")
+        self.assertIn("Agent extensions: notes (API v1)", result["extension_status"])
+        self.assertEqual(result["runtime_provider"], "codex")
+        self.assertEqual(result["runtime_session_id"], "portable-session")
+        self.assertEqual(result["runtime_completion_reason"], "completed")
+        self.assertEqual(
+            result["runtime_event_types"],
+            ["thread.started", "turn.completed"],
+        )
+        self.assertGreater(result["startup_messages"], 0)
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["branch_preserved"])
+        self.assertFalse(result["workspace_exists"])
+        self.assertTrue(result["result_committed"])
+
+
+def _project_metadata(path: Path) -> dict:
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def _dependency(dependencies: list[str], name: str) -> str:
+    matches = [dependency for dependency in dependencies if dependency.split()[0] == name]
+    if len(matches) != 1:
+        raise AssertionError(f"Expected exactly one {name} dependency, found {matches}")
+    return matches[0]
+
+
+def _write_chat_provider_package(root: Path) -> None:
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        textwrap.dedent(
+            """
+            [project]
+            name = "ruth-portable-chat-provider"
+            version = "0.0.1"
+            requires-python = ">=3.11"
+
+            [project.entry-points."our_ark.providers"]
+            "chat.portable" = "portable_chat:create_provider"
+
+            [build-system]
+            requires = ["setuptools"]
+            build-backend = "setuptools.build_meta"
+
+            [tool.setuptools]
+            py-modules = ["portable_chat"]
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "portable_chat.py").write_text(
+        textwrap.dedent(
+            """
+            class PortableChat:
+                name = "portable-chat"
+                provider_kind = "chat"
+
+                def __init__(self):
+                    self.sent = []
+
+                @property
+                def allowed_conversation_id(self):
+                    return "portable-room"
+
+                def receive(self, cursor=None):
+                    return []
+
+                def send_message(self, conversation_id, text):
+                    self.sent.append((conversation_id, text))
+                    return f"message-{len(self.sent)}"
+
+                def edit_message(self, conversation_id, message_id, text):
+                    return None
+
+                def send_read_ack(self, conversation_id, message_id):
+                    return None
+
+
+            def create_provider(root=None):
+                return PortableChat()
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+
+def _write_vcs_provider_package(root: Path) -> None:
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        textwrap.dedent(
+            """
+            [project]
+            name = "ruth-portable-vcs-provider"
+            version = "0.0.1"
+            requires-python = ">=3.11"
+
+            [project.entry-points."our_ark.providers"]
+            "vcs.portable" = "portable_vcs:create_provider"
+
+            [build-system]
+            requires = ["setuptools"]
+            build-backend = "setuptools.build_meta"
+
+            [tool.setuptools]
+            py-modules = ["portable_vcs"]
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "portable_vcs.py").write_text(
+        textwrap.dedent(
+            """
+            from pathlib import Path
+            import subprocess
+
+
+            class PortableVcs:
+                name = "portable-vcs"
+                provider_kind = "vcs"
+
+                def _git(self, args, root=None, *, check=True):
+                    result = subprocess.run(
+                        ["git", *args],
+                        cwd=root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    if check and result.returncode != 0:
+                        raise RuntimeError(result.stderr or result.stdout)
+                    return result
+
+                def current_branch(self, root=None):
+                    return self._git(["branch", "--show-current"], root).stdout.strip()
+
+                def is_clean(self, root=None):
+                    return not self._git(["status", "--porcelain"], root).stdout.strip()
+
+                def changed_files(self, root=None):
+                    tracked = self._git(["diff", "--name-only", "HEAD"], root).stdout.splitlines()
+                    untracked = self._git(
+                        ["ls-files", "--others", "--exclude-standard"], root
+                    ).stdout.splitlines()
+                    return [path for path in [*tracked, *untracked] if path]
+
+                def diff_summary(self, root=None):
+                    return self._git(["diff", "--stat", "HEAD"], root).stdout.strip()
+
+                def stage(self, files, root=None):
+                    self._git(["add", "--", *files], root)
+
+                def commit(self, message, root=None):
+                    self._git(["commit", "-m", message], root)
+                    return self.current_revision(root)
+
+                def create_branch(self, branch, root=None, *, start_point=""):
+                    args = ["switch", "-c", branch]
+                    if start_point:
+                        args.append(start_point)
+                    self._git(args, root)
+
+                def switch_branch(self, branch, root=None):
+                    self._git(["switch", branch], root)
+
+                def delete_branch(self, branch, root=None, *, force=False):
+                    self._git(["branch", "-D" if force else "-d", branch], root)
+
+                def branch_exists(self, branch, root=None):
+                    return self._git(
+                        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                        root,
+                        check=False,
+                    ).returncode == 0
+
+                def task_base(self, root=None):
+                    return self.authoritative_branch(root)
+
+                def authoritative_branch(self, root=None):
+                    return "main"
+
+                def refresh_authoritative(self, root=None):
+                    return ""
+
+                def authoritative_revision(self, root=None):
+                    return self.resolve_revision(self.authoritative_branch(root), root)
+
+                def current_revision(self, root=None):
+                    return self.resolve_revision("HEAD", root)
+
+                def resolve_revision(self, revision, root=None):
+                    result = self._git(["rev-parse", revision], root, check=False)
+                    return result.stdout.strip() if result.returncode == 0 else ""
+
+                def is_ancestor(self, revision, descendant, root=None):
+                    return self._git(
+                        ["merge-base", "--is-ancestor", revision, descendant],
+                        root,
+                        check=False,
+                    ).returncode == 0
+
+                def update_to_authoritative(self, root=None):
+                    return "Already up to date."
+
+                def restore_revision(self, revision, root=None):
+                    self._git(["reset", "--hard", revision], root)
+
+                def workspace_paths(self, root=None):
+                    output = self._git(["worktree", "list", "--porcelain"], root).stdout
+                    return tuple(
+                        Path(line.removeprefix("worktree ")).resolve()
+                        for line in output.splitlines()
+                        if line.startswith("worktree ")
+                    )
+
+                def create_workspace(
+                    self,
+                    path,
+                    branch,
+                    root=None,
+                    *,
+                    start_point="",
+                    create_branch=False,
+                ):
+                    args = ["worktree", "add"]
+                    if create_branch:
+                        args.extend(["-b", branch])
+                    args.extend([str(path), start_point or branch])
+                    self._git(args, root)
+
+                def remove_workspace(self, path, root=None):
+                    self._git(["worktree", "remove", str(path)], root)
+
+
+            def create_provider(root=None):
+                return PortableVcs()
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+
+def _write_fake_codex(path: Path) -> None:
+    path.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(
+            """
+            import json
+            from pathlib import Path
+            import sys
+
+            args = sys.argv[1:]
+            if args[:2] == ["login", "status"]:
+                print("Logged in using portable test runtime.")
+                raise SystemExit(0)
+            prompt = sys.stdin.read()
+            if "Operate as a careful researcher." not in prompt:
+                raise SystemExit("Installed profile context did not reach the task prompt.")
+            cwd = Path(args[args.index("--cd") + 1])
+            (cwd / "PORTABLE_RESULT.md").write_text(
+                "Completed by installed Ruth.\\n",
+                encoding="utf-8",
+            )
+            output = Path(args[args.index("--output-last-message") + 1])
+            output.write_text("Completed portable task.", encoding="utf-8")
+            print(json.dumps({"type": "thread.started", "thread_id": "portable-session"}))
+            print(json.dumps({"type": "turn.completed", "usage": {}}))
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_profile_package(root: Path) -> None:
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        textwrap.dedent(
+            """
+            [project]
+            name = "ruth-portable-researcher-profile"
+            version = "0.0.1"
+            requires-python = ">=3.11"
+
+            [project.entry-points."our_ark.profiles"]
+            researcher = "portable_researcher:create_profile"
+
+            [build-system]
+            requires = ["setuptools"]
+            build-backend = "setuptools.build_meta"
+
+            [tool.setuptools]
+            py-modules = ["portable_researcher"]
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "portable_researcher.py").write_text(
+        textwrap.dedent(
+            """
+            from ruth.profiles import (
+                AgentProfile,
+                CommandSpec,
+                ProfilePresentation,
+                WorkflowPolicy,
+            )
+
+
+            def research(command):
+                if not command.argument:
+                    return "Use /research <topic>."
+                job = command.enqueue_task(
+                    "Create PORTABLE_RESULT.md after researching " + command.argument,
+                    context="Use primary sources and preserve provenance.",
+                )
+                return f"Queued portable research task #{job.id}."
+
+
+            def research_context(context):
+                return "Operate as a careful researcher." if context.purpose == "task" else ""
+
+
+            def create_profile(root=None):
+                return AgentProfile(
+                    name="researcher",
+                    workflow=WorkflowPolicy(
+                        timeout_seconds=180,
+                        max_attempts=1,
+                        allow_direct_work=False,
+                    ),
+                    presentation=ProfilePresentation(
+                        display_name="Portable Researcher",
+                        help_heading="Portable research",
+                        task_label="Research task",
+                    ),
+                    commands=(
+                        CommandSpec(
+                            name="research",
+                            summary="queue portable research",
+                            handler=research,
+                        ),
+                    ),
+                    prompt_contributors=(research_context,),
+                )
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+
+def _write_extension_package(root: Path) -> None:
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        textwrap.dedent(
+            """
+            [project]
+            name = "ruth-portable-notes-extension"
+            version = "0.0.1"
+            requires-python = ">=3.11"
+
+            [project.entry-points."our_ark.extensions"]
+            notes = "portable_notes:create_extension"
+
+            [build-system]
+            requires = ["setuptools"]
+            build-backend = "setuptools.build_meta"
+
+            [tool.setuptools]
+            py-modules = ["portable_notes"]
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "portable_notes.py").write_text(
+        textwrap.dedent(
+            """
+            from ruth.extensions import (
+                AgentExtension,
+                ExtensionCommandSpec,
+                ExtensionLifecycleHooks,
+            )
+
+
+            def notes(command):
+                if not command.argument:
+                    return "Use /notes <topic>."
+                state = command.storage.private_path("notes.txt")
+                state.parent.mkdir(parents=True, exist_ok=True)
+                state.write_text(command.argument + "\\n", encoding="utf-8")
+                job = command.enqueue_task(
+                    "Create portable notes about " + command.argument,
+                    context="Preserve the installed extension provenance.",
+                    idempotency_key="notes:" + command.argument,
+                )
+                return f"Queued portable notes task #{job.id}."
+
+
+            def task_event(context, event):
+                path = context.storage.private_path("last-event.txt")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(event.event + "\\n", encoding="utf-8")
+
+
+            def create_extension(root=None):
+                return AgentExtension(
+                    name="notes",
+                    help_heading="Portable notes",
+                    commands=(
+                        ExtensionCommandSpec(
+                            name="notes",
+                            summary="queue portable notes",
+                            usage="/notes <topic> - queue portable notes",
+                            handler=notes,
+                        ),
+                    ),
+                    lifecycle=ExtensionLifecycleHooks(
+                        on_task_event=task_event,
+                    ),
+                )
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+
+_INSTALLED_TASK_SCRIPT = textwrap.dedent(
+    """
+    import json
+    from importlib import resources
+    from importlib.metadata import version
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    from ruth import agent_identity_schema
+    from ruth.app.core import RuthApplication
+    from ruth.app.epoch import daemon_epoch_guard
+    from ruth.application import (
+        APPLICATION_COMPOSITION_API_VERSION,
+        ApplicationComposition,
+        ApplicationPresentation,
+    )
+    from ruth.conformance import CONFORMANCE_API_VERSION
+    from ruth.extensions import AGENT_EXTENSION_API_VERSION
+    from ruth.identity import load_identity
+    from ruth.providers import (
+        REPOSITORY_CONTRACT_VERSION,
+        REVIEW_CONTRACT_VERSION,
+        ChatEvent,
+    )
+    from ruth.workflows import LocalWorkflowEngine
+
+
+    root = Path(sys.argv[1])
+    root.mkdir()
+    (root / "body.yaml").write_text(
+        resources.files("ruth").joinpath("body.yaml").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+
+    class InstalledWorkflow(LocalWorkflowEngine):
+        def __init__(self, root, epoch, epoch_root):
+            super().__init__(root, epoch=epoch)
+            self.epoch_root = epoch_root
+            self.operations = []
+
+        def _mutation(self):
+            return daemon_epoch_guard(self.epoch, self.epoch_root)
+
+        def enqueue(self, conversation_id, request, *, mode="queued", **options):
+            self.operations.append("enqueue")
+            return super().enqueue(
+                conversation_id, request, mode=mode, **options
+            )
+
+        def claim(self, task_id, worker_id, worker_pid):
+            self.operations.append("claim")
+            return super().claim(task_id, worker_id, worker_pid)
+
+        def finalize(self, task_id, status, **options):
+            self.operations.append(f"finalize:{status}")
+            return super().finalize(task_id, status, **options)
+
+        def recover(self):
+            self.operations.append("recover")
+            return super().recover()
+
+        def reconcile(self, request=None):
+            self.operations.append("reconcile")
+            return super().reconcile(request)
+
+    def git(*args):
+        result = subprocess.run(
+            ["git", *args], cwd=root, text=True, capture_output=True, check=False
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or result.stdout)
+        return result.stdout.strip()
+
+    git("init", "-b", "main")
+    git("config", "user.name", "Portable Ruth")
+    git("config", "user.email", "portable@example.com")
+    (root / ".gitignore").write_text(".ruth/\\n.agent/instance.yaml\\n", encoding="utf-8")
+    (root / "README.md").write_text("portable body\\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "initial")
+    config = root / ".ruth" / "config.yaml"
+    config.parent.mkdir()
+    config.write_text(
+        "providers:\\n  chat: portable\\n  vcs: portable\\n  forge: local\\n"
+        "agent:\\n  profile: researcher\\n  extensions: notes\\n",
+        encoding="utf-8",
+    )
+
+    composition = ApplicationComposition(
+        name="portable-descendant",
+        identity_loader=load_identity,
+        identity_path_resolver=lambda body: body / "body.yaml",
+        presentation=ApplicationPresentation(
+            display_name="Portable descendant",
+            ready_message="Portable descendant is ready.",
+        ),
+        required_extensions=("notes",),
+        workflow_factory=lambda _body, epoch: InstalledWorkflow(
+            root.parent / "workflow-state",
+            epoch,
+            root,
+        ),
+    )
+    components = composition.resolve(root)
+    chat = components.chat
+    runtime = components.runtime
+    vcs = components.repository
+    forge = components.review
+    profile = components.profile
+    extensions = components.extensions
+    workflow = components.workflow
+    app = RuthApplication(
+        identity=components.identity,
+        root=root,
+        client=chat,
+        runtime=runtime,
+        repository=vcs,
+        review=forge,
+        profile=profile,
+        extensions=extensions,
+        daemon_epoch=components.daemon_epoch,
+        workflow=workflow,
+        identity_path=components.identity_path,
+        presentation=components.presentation,
+    )
+    app.notify_startup()
+    app.handle_event(
+        ChatEvent(
+            cursor="profile-help",
+            conversation_id="portable-room",
+            message_id="profile-help",
+            text="/help",
+        )
+    )
+    profile_help = chat.sent[-1][1]
+    app.handle_event(
+        ChatEvent(
+            cursor="profile-command",
+            conversation_id="portable-room",
+            message_id="profile-command",
+            text="/research stable extension APIs",
+        )
+    )
+    queued = workflow.inspect().pending[-1]
+    profile_command_reply = chat.sent[-1][1]
+    running = workflow.start_next()
+    assert running is not None and running.id == queued.id
+    app._run_task_job(running)
+    completed = workflow.inspect().history[-1]
+    app.handle_event(
+        ChatEvent(
+            cursor="extension-help",
+            conversation_id="portable-room",
+            message_id="extension-help",
+            text="/help notes",
+        )
+    )
+    extension_help = chat.sent[-1][1]
+    app.handle_event(
+        ChatEvent(
+            cursor="extension-command",
+            conversation_id="portable-room",
+            message_id="extension-command",
+            text="/notes portable-extension",
+        )
+    )
+    extension_job = workflow.inspect().pending[-1]
+    extension_reply = chat.sent[-1][1]
+    extension_running = workflow.start_next()
+    assert extension_running is not None and extension_running.id == extension_job.id
+    workflow.finalize(
+        extension_running.id,
+        "completed",
+        result="Portable notes completed.",
+    )
+    app.run_once()
+    app.handle_event(
+        ChatEvent(
+            cursor="extension-status",
+            conversation_id="portable-room",
+            message_id="extension-status",
+            text="/status",
+        )
+    )
+    extension_status = chat.sent[-1][1]
+    branch_preserved = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{completed.branch_name}"],
+        cwd=root,
+        check=False,
+    ).returncode == 0
+    result_committed = subprocess.run(
+        ["git", "show", f"{completed.branch_name}:PORTABLE_RESULT.md"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    ).returncode == 0
+    print(json.dumps({
+        "chat": chat.name,
+        "vcs": vcs.name,
+        "runtime": runtime.name,
+        "forge": forge.name,
+        "ruth_version": version("ruth"),
+        "agent_identity_schema_id": agent_identity_schema()["$id"],
+        "provider_kit_version": version("our-ark-provider-kit"),
+        "chat_provider_version": version("ruth-portable-chat-provider"),
+        "vcs_provider_version": version("ruth-portable-vcs-provider"),
+        "profile": profile.name,
+        "profile_version": version("ruth-portable-researcher-profile"),
+        "extension": extensions[0].name,
+        "extension_version": version("ruth-portable-notes-extension"),
+        "extension_api_version": AGENT_EXTENSION_API_VERSION,
+        "composition_api_version": APPLICATION_COMPOSITION_API_VERSION,
+        "composition": components.composition_name,
+        "workflow_api_version": workflow.api_version,
+        "conformance_api_version": CONFORMANCE_API_VERSION,
+        "repository_contract_version": REPOSITORY_CONTRACT_VERSION,
+        "review_contract_version": REVIEW_CONTRACT_VERSION,
+        "workflow_operations": workflow.operations,
+        "workflow_state_isolated": (
+            workflow.root != root
+            and not (root / ".ruth" / "task_queue.json").exists()
+        ),
+        "profile_trigger": completed.trigger,
+        "profile_context_source": completed.context_source,
+        "profile_command_reply": profile_command_reply,
+        "profile_help": profile_help,
+        "profile_timeout_seconds": completed.timeout_seconds,
+        "profile_max_attempts": completed.max_attempts,
+        "profile_task_label_applied": any(
+            text.startswith(f"Research task #{completed.id}")
+            for _conversation_id, text in chat.sent
+        ),
+        "extension_trigger": extension_job.trigger,
+        "extension_context_source": extension_job.context_source,
+        "extension_idempotency_key": extension_job.idempotency_key,
+        "extension_help": extension_help,
+        "extension_reply": extension_reply,
+        "extension_state_namespaced": (
+            root / ".ruth" / "extensions" / "notes" / "notes.txt"
+        ).is_file(),
+        "extension_last_event": (
+            root / ".ruth" / "extensions" / "notes" / "last-event.txt"
+        ).read_text(encoding="utf-8").strip(),
+        "extension_status": extension_status,
+        "runtime_provider": completed.runtime_provider,
+        "runtime_session_id": completed.runtime_session_id,
+        "runtime_completion_reason": completed.runtime_completion_reason,
+        "runtime_event_types": completed.runtime_event_types,
+        "startup_messages": len(chat.sent),
+        "status": completed.status,
+        "branch_preserved": branch_preserved,
+        "workspace_exists": Path(completed.worktree_path).exists(),
+        "result_committed": result_committed,
+    }))
+    """
+)
+
+
+if __name__ == "__main__":
+    unittest.main()

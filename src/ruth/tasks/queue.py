@@ -1,0 +1,2636 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+import json
+import os
+from pathlib import Path
+import re
+from typing import Callable, Literal
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+from ruth.memory.paths import atomic_write, now as current_time
+from ruth.paths import private_state_path
+from ruth.providers.contracts import (
+    ConversationId,
+    MessageId,
+    RuntimeResult,
+    TaskRequirements,
+    normalize_conversation_id,
+    normalize_message_id,
+)
+from ruth.tasks.events import normalize_task_initiator, normalize_task_source, record_task_event
+from ruth.tasks.payloads import (
+    ExtensionArtifactReference,
+    JsonValue,
+    extension_artifact_references_from_json,
+    extension_artifact_references_to_json,
+    normalize_extension_artifact_references,
+    normalize_extension_metadata,
+    require_extension_lane_namespace,
+    require_extension_payload_namespace,
+)
+from ruth.state import StateCorruptionError, file_transaction, load_json_object
+
+
+SCHEMA_VERSION = 15
+DEFAULT_MAX_ATTEMPTS = 3
+ReconciliationOutcome = Literal[
+    "no_op",
+    "terminal_repair",
+    "interrupted_worker_recovery",
+    "conflict",
+    "unsupported_evidence",
+]
+TerminalTaskStatus = Literal["completed", "failed", "cancelled"]
+LEGACY_REVIEW_URL_PATTERN = re.compile(
+    r"https://[^\s]+/(?:pull|pulls|merge_requests)/\d+"
+)
+
+
+@dataclass(frozen=True)
+class TaskJob:
+    id: int
+    chat_id: ConversationId
+    text: str
+    created_at: str
+    started_at: str = ""
+    completed_at: str = ""
+    status: str = "pending"
+    status_message_id: MessageId | None = None
+    result: str = ""
+    review_urls: tuple[str, ...] = ()
+    context: str = ""
+    context_source: str = ""
+    source: str = "task"
+    initiated_by: str = "human"
+    trigger: str = ""
+    candidate_id: str = ""
+    parent_task_id: int | None = None
+    evidence_source: str = ""
+    signal_actor: str = ""
+    candidate_actor: str = ""
+    approval_actor: str = ""
+    parent_candidate_id: str = ""
+    source_task_id: int | None = None
+    worker_id: str = ""
+    worker_pid: int | None = None
+    worker_heartbeat_at: str = ""
+    worker_lease_id: str = ""
+    workspace_path: str = ""
+    workspace_id: str = ""
+    attempt: int = 0
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    timeout_seconds: int | None = None
+    required_capabilities: tuple[str, ...] = ()
+    extension_metadata: dict[str, JsonValue] = field(default_factory=dict)
+    extension_artifact_refs: tuple[ExtensionArtifactReference, ...] = ()
+    execution_lane: str = ""
+    next_attempt_at: str = ""
+    failure_code: str = ""
+    failure_class: str = ""
+    retryable: bool = False
+    runtime_provider: str = ""
+    runtime_session_id: str = ""
+    runtime_completion_reason: str = ""
+    runtime_usage: dict[str, int] = field(default_factory=dict)
+    runtime_event_types: tuple[str, ...] = ()
+    runtime_output_refs: tuple[str, ...] = ()
+    runtime_side_effects: tuple[str, ...] = ()
+    idempotency_key: str = ""
+    publish_stage: str = ""
+    revision_id: str = ""
+    review_id: str = ""
+    review_url: str = ""
+    review_published: bool = False
+    terminal_status: str = ""
+    terminal_evidence_source: str = ""
+    terminal_evidence_at: str = ""
+
+    # Compatibility aliases for task queue schema <= 11 and workflow API v1.
+    @property
+    def pr_urls(self) -> tuple[str, ...]:
+        return self.review_urls
+
+    @property
+    def worktree_path(self) -> str:
+        return self.workspace_path
+
+    @property
+    def branch_name(self) -> str:
+        return self.workspace_id
+
+    @property
+    def commit_sha(self) -> str:
+        return self.revision_id
+
+    @property
+    def remote_branch(self) -> str:
+        return self.workspace_id
+
+    @property
+    def pr_url(self) -> str:
+        return self.review_url
+
+    @property
+    def published_remotely(self) -> bool:
+        return self.review_published
+
+
+@dataclass(frozen=True)
+class TaskQueueStatus:
+    pending_count: int
+    paused_count: int = 0
+    running: TaskJob | None = None
+    pending: tuple[TaskJob, ...] = ()
+    paused: tuple[TaskJob, ...] = ()
+    history: tuple[TaskJob, ...] = ()
+    reconciliation: TaskReconciliationResult | None = None
+
+
+@dataclass(frozen=True)
+class TaskTerminalEvidence:
+    status: TerminalTaskStatus
+    result: str = ""
+    source: str = "work-outcome"
+    failure_code: str = ""
+    failure_class: str = ""
+    retryable: bool = False
+
+    def __post_init__(self) -> None:
+        if self.status not in {"completed", "failed", "cancelled"}:
+            raise ValueError(f"Unknown terminal task status {self.status!r}.")
+        source = self.source.strip().lower()
+        if not source:
+            raise ValueError("Terminal task evidence source is required.")
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "result", self.result.strip())
+        object.__setattr__(self, "failure_code", self.failure_code.strip())
+        object.__setattr__(self, "failure_class", self.failure_class.strip())
+
+
+@dataclass(frozen=True)
+class TaskReconciliationRequest:
+    expected_task_id: int
+    expected_worker_id: str = ""
+    expected_worker_heartbeat_at: str = ""
+    expected_worker_lease_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.expected_task_id <= 0:
+            raise ValueError("Reconciliation requires a positive task id.")
+        object.__setattr__(self, "expected_worker_id", self.expected_worker_id.strip())
+        object.__setattr__(
+            self,
+            "expected_worker_heartbeat_at",
+            self.expected_worker_heartbeat_at.strip(),
+        )
+        object.__setattr__(
+            self,
+            "expected_worker_lease_id",
+            self.expected_worker_lease_id.strip(),
+        )
+
+
+@dataclass(frozen=True)
+class TaskReconciliationResult:
+    outcome: ReconciliationOutcome
+    checked_at: str
+    task_id: int | None = None
+    previous_status: str = ""
+    resulting_status: str = ""
+    evidence: tuple[str, ...] = ()
+    reason: str = ""
+    worker_id: str = ""
+    worker_heartbeat_at: str = ""
+    worker_lease_id: str = ""
+    recorded: bool = True
+
+
+@dataclass(frozen=True)
+class TaskPublicationState:
+    stage: str
+    revision_id: str = ""
+    workspace_id: str = ""
+    review_id: str = ""
+    review_url: str = ""
+    review_published: bool | None = None
+
+
+class TaskRetryError(ValueError):
+    pass
+
+
+class TaskAlreadyExists(RuntimeError):
+    def __init__(self, job: TaskJob) -> None:
+        super().__init__(f"Task #{job.id} already exists for this chat update.")
+        self.job = job
+
+
+def task_queue_path(root: Path | None = None) -> Path:
+    return private_state_path("task_queue.json", root)
+
+
+def enqueue_task(
+    chat_id: ConversationId,
+    text: str,
+    root: Path | None = None,
+    *,
+    context: str = "",
+    context_source: str = "",
+    source: str = "task",
+    initiated_by: str = "human",
+    event_actor: str = "human",
+    trigger: str = "/task",
+    candidate_id: str = "",
+    parent_task_id: int | None = None,
+    evidence_source: str = "",
+    signal_actor: str = "",
+    candidate_actor: str = "",
+    approval_actor: str = "",
+    parent_candidate_id: str = "",
+    source_task_id: int | None = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    timeout_seconds: int | None = None,
+    required_capabilities: tuple[str, ...] = (),
+    idempotency_key: str = "",
+    extension_metadata: dict[str, JsonValue] | None = None,
+    extension_artifact_refs: tuple[ExtensionArtifactReference, ...] = (),
+    execution_lane: str = "",
+) -> TaskJob:
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        raise ValueError("Task text is required.")
+    source = normalize_task_source(source)
+    initiated_by = normalize_task_initiator(initiated_by)
+    max_attempts = _required_positive_int(max_attempts, "Task max attempts")
+    timeout_seconds = _optional_positive_int(timeout_seconds, "Task timeout")
+    required_capabilities = TaskRequirements(required_capabilities).capabilities
+    extension_metadata = normalize_extension_metadata(extension_metadata)
+    extension_artifact_refs = normalize_extension_artifact_references(
+        extension_artifact_refs
+    )
+    require_extension_payload_namespace(
+        context_source.strip(),
+        extension_metadata,
+        extension_artifact_refs,
+    )
+    execution_lane = require_extension_lane_namespace(
+        context_source.strip(),
+        execution_lane,
+    )
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        if existing := _find_task_by_idempotency_key(data, idempotency_key):
+            return existing
+        job = TaskJob(
+            id=_next_id(data),
+            chat_id=chat_id,
+            text=cleaned,
+            created_at=current_time(),
+            context=context.strip(),
+            context_source=context_source.strip(),
+            source=source,
+            initiated_by=initiated_by,
+            trigger=trigger.strip(),
+            candidate_id=candidate_id.strip(),
+            parent_task_id=_positive_int(parent_task_id),
+            evidence_source=evidence_source.strip().lower(),
+            signal_actor=_normalize_provenance_actor(signal_actor),
+            candidate_actor=_normalize_provenance_actor(candidate_actor),
+            approval_actor=_normalize_provenance_actor(approval_actor),
+            parent_candidate_id=parent_candidate_id.strip(),
+            source_task_id=_positive_int(source_task_id),
+            max_attempts=max_attempts,
+            timeout_seconds=timeout_seconds,
+            required_capabilities=required_capabilities,
+            extension_metadata=extension_metadata,
+            extension_artifact_refs=extension_artifact_refs,
+            execution_lane=execution_lane,
+            idempotency_key=idempotency_key.strip(),
+        )
+        pending = data.setdefault("pending", [])
+        pending.append(_job_to_dict(job))
+        data["next_id"] = job.id + 1
+        _write_queue(data, root)
+        _record_task_event_safely(job, "created", root, event_actor=event_actor, trigger=trigger)
+        _record_task_event_safely(job, "queued", root, event_actor=event_actor, trigger=trigger)
+        return job
+
+
+def retry_failed_task(
+    task_id: int,
+    root: Path | None = None,
+    *,
+    reconciled_result: str = "",
+    event_actor: str = "human",
+    trigger: str = "/task retry",
+) -> TaskJob:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        original = next(
+            (
+                job
+                for job in _history_jobs(data)
+                if job.id == task_id and job.status == "failed"
+            ),
+            None,
+        )
+        if original is None:
+            raise TaskRetryError(
+                f"Task #{task_id} is not a failed task available for retry."
+            )
+        existing_retries = [
+            job
+            for job in [
+                *_pending_jobs(data),
+                *_paused_jobs(data),
+                *(
+                    [_parse_job(data.get("running"))]
+                    if _parse_job(data.get("running")) is not None
+                    else []
+                ),
+                *_history_jobs(data),
+            ]
+            if job.parent_task_id == original.id
+            and job.status != "cancelled"
+        ]
+        if existing_retries:
+            latest = max(existing_retries, key=lambda job: job.id)
+            if latest.status == "failed":
+                raise TaskRetryError(
+                    f"Task #{original.id} was already retried as failed task "
+                    f"#{latest.id}. Retry task #{latest.id} instead."
+                )
+            raise TaskRetryError(
+                f"Task #{original.id} already has retry task #{latest.id} "
+                f"in status {latest.status}."
+            )
+        artifact_result = reconciled_result.strip()
+        job = TaskJob(
+            id=_next_id(data),
+            chat_id=original.chat_id,
+            text=original.text,
+            created_at=current_time(),
+            context=original.context,
+            context_source=original.context_source,
+            source=original.source,
+            initiated_by="human",
+            trigger=trigger,
+            candidate_id=original.candidate_id,
+            parent_task_id=original.id,
+            evidence_source=original.evidence_source,
+            signal_actor=original.signal_actor,
+            candidate_actor=original.candidate_actor,
+            approval_actor="human" if original.candidate_id else "",
+            parent_candidate_id=original.parent_candidate_id,
+            source_task_id=original.source_task_id,
+            result=artifact_result,
+            review_urls=_merge_review_urls(
+                original.review_urls,
+                _review_urls(artifact_result),
+                (original.review_url,) if original.review_url else (),
+            ),
+            workspace_path=original.workspace_path,
+            workspace_id=original.workspace_id,
+            publish_stage=original.publish_stage,
+            revision_id=original.revision_id,
+            review_id=original.review_id,
+            review_url=original.review_url,
+            review_published=original.review_published,
+            max_attempts=original.max_attempts,
+            timeout_seconds=original.timeout_seconds,
+            required_capabilities=original.required_capabilities,
+            extension_metadata=normalize_extension_metadata(
+                original.extension_metadata
+            ),
+            extension_artifact_refs=normalize_extension_artifact_references(
+                original.extension_artifact_refs
+            ),
+            execution_lane=original.execution_lane,
+        )
+        pending = data.setdefault("pending", [])
+        pending.append(_job_to_dict(job))
+        data["next_id"] = job.id + 1
+        _write_queue(data, root)
+        _record_task_event_safely(
+            job,
+            "created",
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+        )
+        _record_task_event_safely(
+            job,
+            "queued",
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+        )
+        return job
+
+
+def enqueue_task_front(
+    chat_id: ConversationId,
+    text: str,
+    root: Path | None = None,
+    *,
+    context: str = "",
+    context_source: str = "",
+    source: str = "chat-task",
+    initiated_by: str = "human",
+    event_actor: str = "human",
+    trigger: str = "/do",
+    candidate_id: str = "",
+    parent_task_id: int | None = None,
+    evidence_source: str = "",
+    signal_actor: str = "",
+    candidate_actor: str = "",
+    approval_actor: str = "",
+    parent_candidate_id: str = "",
+    source_task_id: int | None = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    timeout_seconds: int | None = None,
+    required_capabilities: tuple[str, ...] = (),
+    idempotency_key: str = "",
+    extension_metadata: dict[str, JsonValue] | None = None,
+    extension_artifact_refs: tuple[ExtensionArtifactReference, ...] = (),
+    execution_lane: str = "",
+) -> TaskJob:
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        raise ValueError("Task text is required.")
+    source = normalize_task_source(source)
+    initiated_by = normalize_task_initiator(initiated_by)
+    max_attempts = _required_positive_int(max_attempts, "Task max attempts")
+    timeout_seconds = _optional_positive_int(timeout_seconds, "Task timeout")
+    required_capabilities = TaskRequirements(required_capabilities).capabilities
+    extension_metadata = normalize_extension_metadata(extension_metadata)
+    extension_artifact_refs = normalize_extension_artifact_references(
+        extension_artifact_refs
+    )
+    require_extension_payload_namespace(
+        context_source.strip(),
+        extension_metadata,
+        extension_artifact_refs,
+    )
+    execution_lane = require_extension_lane_namespace(
+        context_source.strip(),
+        execution_lane,
+    )
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        if existing := _find_task_by_idempotency_key(data, idempotency_key):
+            return existing
+        job = TaskJob(
+            id=_next_id(data),
+            chat_id=chat_id,
+            text=cleaned,
+            created_at=current_time(),
+            context=context.strip(),
+            context_source=context_source.strip(),
+            source=source,
+            initiated_by=initiated_by,
+            trigger=trigger.strip(),
+            candidate_id=candidate_id.strip(),
+            parent_task_id=_positive_int(parent_task_id),
+            evidence_source=evidence_source.strip().lower(),
+            signal_actor=_normalize_provenance_actor(signal_actor),
+            candidate_actor=_normalize_provenance_actor(candidate_actor),
+            approval_actor=_normalize_provenance_actor(approval_actor),
+            parent_candidate_id=parent_candidate_id.strip(),
+            source_task_id=_positive_int(source_task_id),
+            max_attempts=max_attempts,
+            timeout_seconds=timeout_seconds,
+            required_capabilities=required_capabilities,
+            extension_metadata=extension_metadata,
+            extension_artifact_refs=extension_artifact_refs,
+            execution_lane=execution_lane,
+            idempotency_key=idempotency_key.strip(),
+        )
+        pending = data.setdefault("pending", [])
+        pending.insert(0, _job_to_dict(job))
+        data["next_id"] = job.id + 1
+        _write_queue(data, root)
+        _record_task_event_safely(job, "created", root, event_actor=event_actor, trigger=trigger)
+        _record_task_event_safely(job, "queued", root, event_actor=event_actor, trigger=trigger)
+        return job
+
+
+def begin_direct_task(
+    chat_id: ConversationId,
+    text: str,
+    root: Path | None = None,
+    *,
+    context: str = "",
+    context_source: str = "",
+    source: str = "chat-task",
+    initiated_by: str = "human",
+    event_actor: str = "human",
+    trigger: str = "/do",
+    candidate_id: str = "",
+    parent_task_id: int | None = None,
+    evidence_source: str = "",
+    signal_actor: str = "",
+    candidate_actor: str = "",
+    approval_actor: str = "",
+    parent_candidate_id: str = "",
+    source_task_id: int | None = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    timeout_seconds: int | None = None,
+    required_capabilities: tuple[str, ...] = (),
+    idempotency_key: str = "",
+    extension_metadata: dict[str, JsonValue] | None = None,
+    extension_artifact_refs: tuple[ExtensionArtifactReference, ...] = (),
+    execution_lane: str = "",
+) -> TaskJob:
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        raise ValueError("Task text is required.")
+    source = normalize_task_source(source)
+    initiated_by = normalize_task_initiator(initiated_by)
+    max_attempts = _required_positive_int(max_attempts, "Task max attempts")
+    timeout_seconds = _optional_positive_int(timeout_seconds, "Task timeout")
+    required_capabilities = TaskRequirements(required_capabilities).capabilities
+    extension_metadata = normalize_extension_metadata(extension_metadata)
+    extension_artifact_refs = normalize_extension_artifact_references(
+        extension_artifact_refs
+    )
+    require_extension_payload_namespace(
+        context_source.strip(),
+        extension_metadata,
+        extension_artifact_refs,
+    )
+    execution_lane = require_extension_lane_namespace(
+        context_source.strip(),
+        execution_lane,
+    )
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        if existing := _find_task_by_idempotency_key(data, idempotency_key):
+            raise TaskAlreadyExists(existing)
+        if _parse_job(data.get("running")) is not None:
+            raise RuntimeError("A task is already running.")
+        job = TaskJob(
+            id=_next_id(data),
+            chat_id=chat_id,
+            text=cleaned,
+            created_at=current_time(),
+            started_at=current_time(),
+            status="running",
+            context=context.strip(),
+            context_source=context_source.strip(),
+            source=source,
+            initiated_by=initiated_by,
+            trigger=trigger.strip(),
+            candidate_id=candidate_id.strip(),
+            parent_task_id=_positive_int(parent_task_id),
+            evidence_source=evidence_source.strip().lower(),
+            signal_actor=_normalize_provenance_actor(signal_actor),
+            candidate_actor=_normalize_provenance_actor(candidate_actor),
+            approval_actor=_normalize_provenance_actor(approval_actor),
+            parent_candidate_id=parent_candidate_id.strip(),
+            source_task_id=_positive_int(source_task_id),
+            attempt=1,
+            max_attempts=max_attempts,
+            timeout_seconds=timeout_seconds,
+            required_capabilities=required_capabilities,
+            extension_metadata=extension_metadata,
+            extension_artifact_refs=extension_artifact_refs,
+            execution_lane=execution_lane,
+            idempotency_key=idempotency_key.strip(),
+        )
+        data["running"] = _job_to_dict(job)
+        data["next_id"] = job.id + 1
+        _write_queue(data, root)
+        _record_task_event_safely(job, "created", root, event_actor=event_actor, trigger=trigger)
+        _record_task_event_safely(job, "started", root, event_actor="system", trigger="task-runner")
+        return job
+
+
+def record_task_status_message(
+    task_id: int,
+    message_id: MessageId,
+    root: Path | None = None,
+) -> None:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        pending = []
+        changed = False
+        for job in _pending_jobs(data):
+            if job.id == task_id:
+                job = _replace_job(job, status_message_id=message_id)
+                changed = True
+            pending.append(_job_to_dict(job))
+        paused = []
+        for job in _paused_jobs(data):
+            if job.id == task_id:
+                job = _replace_job(job, status_message_id=message_id)
+                changed = True
+            paused.append(_job_to_dict(job))
+        running = _parse_job(data.get("running"))
+        if running is not None and running.id == task_id:
+            running = _replace_job(running, status_message_id=message_id)
+            changed = True
+        if not changed:
+            return
+        data["pending"] = pending
+        data["paused"] = paused
+        data["running"] = _job_to_dict(running) if running is not None else None
+        _write_queue(data, root)
+
+
+def begin_next_task(root: Path | None = None) -> TaskJob | None:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        if _parse_job(data.get("running")) is not None:
+            return None
+        pending = _pending_jobs(data)
+        if not pending:
+            return None
+        blocked_lanes = {
+            job.execution_lane
+            for job in _paused_jobs(data)
+            if job.execution_lane
+        }
+        ready_index = next(
+            (
+                index
+                for index, candidate in enumerate(pending)
+                if _task_is_due(candidate)
+                and _lane_predecessors_finished(
+                    candidate,
+                    pending[:index],
+                    blocked_lanes,
+                )
+            ),
+            None,
+        )
+        if ready_index is None:
+            return None
+        job = pending[ready_index]
+        running = _replace_job(
+            job,
+            started_at=current_time(),
+            completed_at="",
+            status="running",
+            attempt=job.attempt + 1,
+            next_attempt_at="",
+            failure_code="",
+            failure_class="",
+            retryable=False,
+        )
+        data["pending"] = [
+            _job_to_dict(item)
+            for index, item in enumerate(pending)
+            if index != ready_index
+        ]
+        data["running"] = _job_to_dict(running)
+        _write_queue(data, root)
+        _record_task_event_safely(running, "started", root, event_actor="system", trigger="task-runner")
+        return running
+
+
+def complete_task(
+    task_id: int,
+    root: Path | None = None,
+    result: str = "",
+    *,
+    event_actor: str = "agent",
+    trigger: str = "task-runner",
+    worker_id: str = "",
+) -> TaskJob | None:
+    return _finish_running_task(
+        task_id,
+        "completed",
+        root,
+        result=result,
+        event_actor=event_actor,
+        trigger=trigger,
+        worker_id=worker_id,
+    )
+
+
+def fail_task(
+    task_id: int,
+    root: Path | None = None,
+    result: str = "",
+    *,
+    event_actor: str = "agent",
+    trigger: str = "task-runner",
+    worker_id: str = "",
+    failure_code: str = "",
+    failure_class: str = "",
+    retryable: bool = False,
+) -> TaskJob | None:
+    return _finish_running_task(
+        task_id,
+        "failed",
+        root,
+        result=result,
+        event_actor=event_actor,
+        trigger=trigger,
+        worker_id=worker_id,
+        failure_code=failure_code,
+        failure_class=failure_class,
+        retryable=retryable,
+    )
+
+
+def retry_running_task(
+    task_id: int,
+    root: Path | None = None,
+    result: str = "",
+    *,
+    failure_code: str,
+    failure_class: str,
+    worker_id: str = "",
+    delay_seconds: int = 0,
+    event_actor: str = "agent",
+    trigger: str = "task-runner",
+) -> TaskJob | None:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        running = _parse_job(data.get("running"))
+        if (
+            running is None
+            or running.id != task_id
+            or (worker_id and running.worker_id != worker_id)
+            or running.attempt >= running.max_attempts
+        ):
+            return None
+        retry_at = _retry_at(delay_seconds)
+        recovered = _replace_job(
+            running,
+            status="pending",
+            started_at="",
+            completed_at="",
+            result=result,
+            review_urls=_merge_review_urls(
+                running.review_urls,
+                _review_urls(result),
+            ),
+            worker_id="",
+            worker_pid=None,
+            worker_heartbeat_at="",
+            worker_lease_id="",
+            next_attempt_at=retry_at,
+            failure_code=failure_code.strip(),
+            failure_class=failure_class.strip(),
+            retryable=True,
+            terminal_status="",
+            terminal_evidence_source="",
+            terminal_evidence_at="",
+        )
+        data["running"] = None
+        data["pending"] = [
+            _job_to_dict(recovered),
+            *[_job_to_dict(job) for job in _pending_jobs(data)],
+        ]
+        _write_queue(data, root)
+        _record_task_event_safely(
+            recovered,
+            "retrying",
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+            result=result,
+        )
+        _record_task_event_safely(
+            recovered,
+            "queued",
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+            result=result,
+        )
+        return recovered
+
+
+def claim_running_task(
+    task_id: int,
+    worker_id: str,
+    worker_pid: int,
+    root: Path | None = None,
+) -> TaskJob | None:
+    cleaned_worker_id = worker_id.strip()
+    if not cleaned_worker_id or worker_pid <= 0:
+        raise ValueError("A worker id and process id are required.")
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        running = _parse_job(data.get("running"))
+        if running is None or running.id != task_id:
+            return None
+        if (
+            running.worker_id
+            and running.worker_id != cleaned_worker_id
+            and task_worker_is_active(running)
+        ):
+            return None
+        claimed = _replace_job(
+            running,
+            worker_id=cleaned_worker_id,
+            worker_pid=worker_pid,
+            worker_heartbeat_at=current_time(),
+            worker_lease_id=uuid4().hex,
+        )
+        data["running"] = _job_to_dict(claimed)
+        _write_queue(data, root)
+        return claimed
+
+
+def heartbeat_task(
+    task_id: int,
+    worker_id: str,
+    root: Path | None = None,
+) -> TaskJob | None:
+    cleaned_worker_id = worker_id.strip()
+    if not cleaned_worker_id:
+        raise ValueError("A worker id is required.")
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        running = _parse_job(data.get("running"))
+        if (
+            running is None
+            or running.id != task_id
+            or running.worker_id != cleaned_worker_id
+        ):
+            return None
+        updated = _replace_job(
+            running,
+            worker_heartbeat_at=current_time(),
+            worker_lease_id=uuid4().hex,
+        )
+        data["running"] = _job_to_dict(updated)
+        _write_queue(data, root)
+        return updated
+
+
+def record_task_workspace(
+    task_id: int,
+    worker_id: str,
+    workspace_path: Path,
+    workspace_id: str,
+    root: Path | None = None,
+) -> TaskJob | None:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        running = _parse_job(data.get("running"))
+        if (
+            running is None
+            or running.id != task_id
+            or not worker_id
+            or running.worker_id != worker_id
+        ):
+            return None
+        updated = _replace_job(
+            running,
+            workspace_path=str(workspace_path.resolve()),
+            workspace_id=workspace_id.strip(),
+        )
+        data["running"] = _job_to_dict(updated)
+        _write_queue(data, root)
+        return updated
+
+
+def record_task_worktree(
+    task_id: int,
+    worker_id: str,
+    worktree_path: Path,
+    branch_name: str,
+    root: Path | None = None,
+) -> TaskJob | None:
+    """Compatibility wrapper for workflow API v1."""
+
+    return record_task_workspace(
+        task_id,
+        worker_id,
+        worktree_path,
+        branch_name,
+        root,
+    )
+
+
+def task_worker_is_active(job: TaskJob) -> bool:
+    if not job.worker_id or job.worker_pid is None:
+        return False
+    try:
+        os.kill(job.worker_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def pause_task(
+    task_id: int,
+    root: Path | None = None,
+    result: str = "",
+    *,
+    event_actor: str = "system",
+    trigger: str = "runtime-unavailable",
+    worker_id: str = "",
+) -> TaskJob | None:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        pending = _pending_jobs(data)
+        running = _parse_job(data.get("running"))
+        paused_job: TaskJob | None = None
+        kept: list[TaskJob] = []
+        for job in pending:
+            if job.id == task_id and paused_job is None:
+                paused_job = job
+            else:
+                kept.append(job)
+        if running is not None and running.id == task_id:
+            if worker_id and running.worker_id != worker_id:
+                return None
+            paused_job = running
+            running = None
+        if paused_job is None:
+            return None
+        paused_job = _replace_job(
+            paused_job,
+            status="paused",
+            completed_at="",
+            result=result or paused_job.result,
+            worker_id="",
+            worker_pid=None,
+            worker_heartbeat_at="",
+            worker_lease_id="",
+            terminal_status="",
+            terminal_evidence_source="",
+            terminal_evidence_at="",
+        )
+        paused = [job for job in _paused_jobs(data) if job.id != task_id]
+        paused.append(paused_job)
+        data["pending"] = [_job_to_dict(job) for job in kept]
+        data["running"] = _job_to_dict(running) if running is not None else None
+        data["paused"] = [_job_to_dict(job) for job in paused]
+        _write_queue(data, root)
+        _record_task_event_safely(
+            paused_job,
+            "paused",
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+            result=result,
+        )
+        return paused_job
+
+
+def resume_paused_tasks(
+    root: Path | None = None,
+    *,
+    task_id: int | None = None,
+    event_actor: str = "human",
+    trigger: str = "/task resume",
+) -> tuple[TaskJob, ...]:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        paused = _paused_jobs(data)
+        if not paused:
+            return ()
+        selected = [
+            job
+            for job in paused
+            if task_id is None or job.id == task_id
+        ]
+        if not selected:
+            return ()
+        selected_ids = {job.id for job in selected}
+        resumed = tuple(
+            _replace_job(
+                job,
+                status="pending",
+                started_at="",
+                completed_at="",
+                worker_id="",
+                worker_pid=None,
+                worker_heartbeat_at="",
+                worker_lease_id="",
+            )
+            for job in selected
+        )
+        data["paused"] = [
+            _job_to_dict(job)
+            for job in paused
+            if job.id not in selected_ids
+        ]
+        data["pending"] = [
+            *[_job_to_dict(job) for job in resumed],
+            *[_job_to_dict(job) for job in _pending_jobs(data)],
+        ]
+        _write_queue(data, root)
+        for job in resumed:
+            _record_task_event_safely(
+                job,
+                "resumed",
+                root,
+                event_actor=event_actor,
+                trigger=trigger,
+                result="Resumed after agent runtime access was restored.",
+            )
+        return resumed
+
+
+def regress_task(
+    task_id: int,
+    root: Path | None = None,
+    result: str = "",
+    *,
+    event_actor: str = "agent",
+    trigger: str = "agent-regression-signal",
+) -> TaskJob | None:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        history = _history_jobs(data)
+        regressed: TaskJob | None = None
+        updated: list[TaskJob] = []
+        for job in history:
+            if job.id == task_id and regressed is None:
+                if job.status != "completed":
+                    return None
+                regressed = _replace_job(
+                    job,
+                    status="regressed",
+                    completed_at=current_time(),
+                    result=result or job.result,
+                )
+                updated.append(regressed)
+            else:
+                updated.append(job)
+        if regressed is None:
+            return None
+        data["history"] = [_job_to_dict(job) for job in updated]
+        _write_queue(data, root)
+        _record_task_event_safely(
+            regressed,
+            "regressed",
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+            result=result,
+        )
+        return regressed
+
+
+def resolve_regressed_task(
+    task_id: int,
+    resolution: str,
+    root: Path | None = None,
+    result: str = "",
+    *,
+    event_actor: str = "agent",
+    trigger: str = "agent-regression-signal",
+    related_task_id: int | None = None,
+) -> TaskJob | None:
+    normalized_resolution = resolution.strip().lower()
+    if normalized_resolution not in {"reverted", "forward-fixed"}:
+        raise ValueError("Regression resolution must be reverted or forward-fixed.")
+    normalized_related_task_id = _positive_int(related_task_id)
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        if normalized_resolution == "forward-fixed":
+            related = _find_task(data, normalized_related_task_id)
+            if (
+                related is None
+                or related.id == task_id
+                or related.status != "completed"
+            ):
+                return None
+        history = _history_jobs(data)
+        resolved: TaskJob | None = None
+        updated: list[TaskJob] = []
+        for job in history:
+            if job.id == task_id and resolved is None:
+                if job.status != "regressed":
+                    return None
+                resolved = _replace_job(
+                    job,
+                    status=normalized_resolution,
+                    completed_at=current_time(),
+                    result=result or job.result,
+                )
+                updated.append(resolved)
+            else:
+                updated.append(job)
+        if resolved is None:
+            return None
+        data["history"] = [_job_to_dict(job) for job in updated]
+        _write_queue(data, root)
+        _record_task_event_safely(
+            resolved,
+            normalized_resolution,
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+            result=result,
+            related_task_id=normalized_related_task_id,
+        )
+        return resolved
+
+
+def revert_task(
+    task_id: int,
+    root: Path | None = None,
+    result: str = "",
+    *,
+    event_actor: str = "human",
+    trigger: str = "revert",
+    related_task_id: int | None = None,
+) -> TaskJob | None:
+    current = _find_task_in_status(task_id, root)
+    if current is None:
+        return None
+    if current.status == "completed":
+        current = regress_task(
+            task_id,
+            root,
+            result=result,
+            event_actor=event_actor,
+            trigger=trigger,
+        )
+    if current is None or current.status != "regressed":
+        return None
+    return resolve_regressed_task(
+        task_id,
+        "reverted",
+        root,
+        result=result,
+        event_actor=event_actor,
+        trigger=trigger,
+        related_task_id=related_task_id,
+    )
+
+
+def record_task_result(task_id: int, result: str, root: Path | None = None) -> None:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        pending = []
+        changed = False
+        for job in _pending_jobs(data):
+            if job.id == task_id:
+                job = _replace_job(
+                    job,
+                    result=result,
+                    review_urls=_merge_review_urls(
+                        job.review_urls,
+                        _review_urls(result),
+                    ),
+                )
+                changed = True
+            pending.append(_job_to_dict(job))
+        running = _parse_job(data.get("running"))
+        if running is not None and running.id == task_id:
+            running = _replace_job(
+                running,
+                result=result,
+                review_urls=_merge_review_urls(
+                    running.review_urls,
+                    _review_urls(result),
+                ),
+            )
+            changed = True
+        if not changed:
+            return
+        data["pending"] = pending
+        data["running"] = _job_to_dict(running) if running is not None else None
+        _write_queue(data, root)
+
+
+def record_task_publication(
+    task_id: int,
+    worker_id: str,
+    state: TaskPublicationState,
+    root: Path | None = None,
+) -> TaskJob | None:
+    allowed_stages = {
+        "validated",
+        "committed",
+        "pushed",
+        "pr_opened",
+        "captured",
+        "review_published",
+    }
+    if state.stage not in allowed_stages:
+        raise ValueError(f"Unknown publish stage {state.stage!r}.")
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        running = _parse_job(data.get("running"))
+        if (
+            running is None
+            or running.id != task_id
+            or not worker_id
+            or running.worker_id != worker_id
+        ):
+            return None
+        updated = _replace_job(
+            running,
+            publish_stage=state.stage,
+            revision_id=state.revision_id.strip() or running.revision_id,
+            workspace_id=state.workspace_id.strip() or running.workspace_id,
+            review_id=state.review_id.strip() or running.review_id,
+            review_url=state.review_url.strip() or running.review_url,
+            review_published=(
+                running.review_published
+                if state.review_published is None
+                else state.review_published
+            ),
+            review_urls=_merge_review_urls(
+                running.review_urls,
+                (state.review_url.strip(),) if state.review_url.strip() else (),
+            ),
+        )
+        data["running"] = _job_to_dict(updated)
+        _write_queue(data, root)
+        return updated
+
+
+def record_task_publish_state(
+    task_id: int,
+    worker_id: str,
+    root: Path | None = None,
+    *,
+    stage: str,
+    commit_sha: str = "",
+    remote_branch: str = "",
+    pr_url: str = "",
+    published_remotely: bool | None = None,
+) -> TaskJob | None:
+    """Compatibility wrapper for queue schema <= 11 and workflow API v1."""
+
+    return record_task_publication(
+        task_id,
+        worker_id,
+        TaskPublicationState(
+            stage=stage,
+            revision_id=commit_sha,
+            workspace_id=remote_branch,
+            review_url=pr_url,
+            review_published=published_remotely,
+        ),
+        root,
+    )
+
+
+def record_task_runtime_result(
+    task_id: int,
+    runtime_result: RuntimeResult,
+    root: Path | None = None,
+    *,
+    provider: str,
+) -> None:
+    runtime_fields = {
+        "runtime_provider": provider.strip().lower(),
+        "runtime_session_id": runtime_result.session_id,
+        "runtime_completion_reason": runtime_result.completion_reason,
+        "runtime_usage": {
+            "input_tokens": runtime_result.usage.input_tokens,
+            "cached_input_tokens": runtime_result.usage.cached_input_tokens,
+            "output_tokens": runtime_result.usage.output_tokens,
+            "reasoning_tokens": runtime_result.usage.reasoning_tokens,
+        },
+        "runtime_event_types": _dedupe_strings(
+            tuple(event.type for event in runtime_result.events)
+        ),
+        "runtime_output_refs": _dedupe_strings(
+            tuple(
+                f"{output.kind}:{output.uri}"
+                for output in runtime_result.output_refs
+            )
+        ),
+        "runtime_side_effects": _dedupe_strings(
+            tuple(
+                f"{effect.kind}:{effect.reference}:{effect.status}"
+                for effect in runtime_result.side_effects
+            )
+        ),
+    }
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        pending = []
+        changed = False
+        for job in _pending_jobs(data):
+            if job.id == task_id:
+                job = _replace_job(job, **runtime_fields)
+                changed = True
+            pending.append(_job_to_dict(job))
+        running = _parse_job(data.get("running"))
+        if running is not None and running.id == task_id:
+            running = _replace_job(running, **runtime_fields)
+            changed = True
+        if not changed:
+            return
+        data["pending"] = pending
+        data["running"] = _job_to_dict(running) if running is not None else None
+        _write_queue(data, root)
+
+
+def record_task_terminal_evidence(
+    task_id: int,
+    worker_id: str,
+    evidence: TaskTerminalEvidence,
+    root: Path | None = None,
+) -> TaskJob | None:
+    cleaned_worker_id = worker_id.strip()
+    if not cleaned_worker_id:
+        raise ValueError("A worker id is required.")
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        running = _parse_job(data.get("running"))
+        if (
+            running is None
+            or running.id != task_id
+            or running.worker_id != cleaned_worker_id
+        ):
+            return None
+        if running.terminal_status:
+            if (
+                running.terminal_status == evidence.status
+                and running.terminal_evidence_source == evidence.source
+                and running.result == evidence.result
+                and running.failure_code == evidence.failure_code
+                and running.failure_class == evidence.failure_class
+                and running.retryable == evidence.retryable
+            ):
+                return running
+            raise ValueError(
+                f"Task #{task_id} already has conflicting terminal evidence."
+            )
+        updated = _replace_job(
+            running,
+            result=evidence.result,
+            review_urls=_merge_review_urls(
+                running.review_urls,
+                _review_urls(evidence.result),
+            ),
+            failure_code=evidence.failure_code,
+            failure_class=evidence.failure_class,
+            retryable=evidence.retryable,
+            terminal_status=evidence.status,
+            terminal_evidence_source=evidence.source,
+            terminal_evidence_at=current_time(),
+        )
+        data["running"] = _job_to_dict(updated)
+        _write_queue(data, root)
+        return updated
+
+
+def _finish_running_task(
+    task_id: int,
+    status: str,
+    root: Path | None = None,
+    result: str = "",
+    *,
+    event_actor: str,
+    trigger: str,
+    worker_id: str = "",
+    failure_code: str = "",
+    failure_class: str = "",
+    retryable: bool = False,
+) -> TaskJob | None:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        running = _parse_job(data.get("running"))
+        if running is None or running.id != task_id:
+            return None
+        if worker_id and running.worker_id != worker_id:
+            return None
+        history = _history_jobs(data)
+        finished = _replace_job(
+            running,
+            status=status,
+            completed_at=current_time(),
+            result=result,
+            review_urls=_merge_review_urls(
+                running.review_urls,
+                _review_urls(result),
+            ),
+            worker_id="",
+            worker_pid=None,
+            worker_heartbeat_at="",
+            worker_lease_id="",
+            failure_code=failure_code.strip(),
+            failure_class=failure_class.strip(),
+            retryable=retryable,
+            next_attempt_at="",
+        )
+        history.append(finished)
+        data["running"] = None
+        data["history"] = [_job_to_dict(job) for job in history]
+        _write_queue(data, root)
+        _record_task_event_safely(
+            finished,
+            status,
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+            result=result,
+        )
+        return finished
+
+
+def cancel_task(
+    task_id: int,
+    root: Path | None = None,
+    *,
+    event_actor: str = "human",
+    trigger: str = "/task cancel",
+) -> TaskJob | None:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        pending = _pending_jobs(data)
+        kept: list[TaskJob] = []
+        cancelled: TaskJob | None = None
+        for job in pending:
+            if job.id == task_id and cancelled is None:
+                cancelled = _replace_job(job, status="cancelled", completed_at=current_time())
+            else:
+                kept.append(job)
+        paused_kept: list[TaskJob] = []
+        for job in _paused_jobs(data):
+            if job.id == task_id and cancelled is None:
+                cancelled = _replace_job(job, status="cancelled", completed_at=current_time())
+            else:
+                paused_kept.append(job)
+        if cancelled is None:
+            return None
+        history = _history_jobs(data)
+        history.append(cancelled)
+        data["pending"] = [_job_to_dict(job) for job in kept]
+        data["paused"] = [_job_to_dict(job) for job in paused_kept]
+        data["history"] = [_job_to_dict(job) for job in history]
+        _write_queue(data, root)
+        _record_task_event_safely(
+            cancelled,
+            "cancelled",
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+        )
+        return cancelled
+
+
+def cancel_running_task(
+    root: Path | None = None,
+    result: str = "Stopped by /stop.",
+    *,
+    event_actor: str = "human",
+    trigger: str = "/stop",
+    expected_task_id: int | None = None,
+    worker_id: str = "",
+) -> TaskJob | None:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        running = _parse_job(data.get("running"))
+        if running is None:
+            return None
+        if expected_task_id is not None and running.id != expected_task_id:
+            return None
+        if worker_id and running.worker_id != worker_id:
+            return None
+        cancelled = _replace_job(
+            running,
+            status="cancelled",
+            completed_at=current_time(),
+            result=result,
+            review_urls=_merge_review_urls(
+                running.review_urls,
+                _review_urls(result),
+            ),
+            worker_id="",
+            worker_pid=None,
+            worker_heartbeat_at="",
+            worker_lease_id="",
+        )
+        history = _history_jobs(data)
+        history.append(cancelled)
+        data["running"] = None
+        data["history"] = [_job_to_dict(job) for job in history]
+        _write_queue(data, root)
+        _record_task_event_safely(
+            cancelled,
+            "cancelled",
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+            result=result,
+        )
+        return cancelled
+
+
+def recover_interrupted_task(root: Path | None = None) -> TaskJob | None:
+    result = reconcile_running_task(root=root)
+    if result.outcome not in {
+        "terminal_repair",
+        "interrupted_worker_recovery",
+    } or result.task_id is None:
+        return None
+    return _find_task_in_status(result.task_id, root)
+
+
+def reconcile_running_task(
+    request: TaskReconciliationRequest | None = None,
+    root: Path | None = None,
+    *,
+    worker_liveness: Callable[[TaskJob], bool] = task_worker_is_active,
+    checked_at: str = "",
+) -> TaskReconciliationResult:
+    checked_at = checked_at.strip() or current_time()
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        running = _parse_job(data.get("running"))
+        if running is None:
+            return TaskReconciliationResult(
+                outcome="no_op",
+                checked_at=checked_at,
+                previous_status="idle",
+                resulting_status="idle",
+                reason="No task is running.",
+                recorded=False,
+            )
+        mismatch = _reconciliation_request_mismatch(request, running)
+        if mismatch:
+            result = _store_reconciliation(
+                data,
+                TaskReconciliationResult(
+                    outcome="conflict",
+                    checked_at=checked_at,
+                    task_id=running.id,
+                    previous_status=running.status,
+                    resulting_status=running.status,
+                    evidence=("task-worker-lease",),
+                    reason=mismatch,
+                    worker_id=running.worker_id,
+                    worker_heartbeat_at=running.worker_heartbeat_at,
+                    worker_lease_id=running.worker_lease_id,
+                ),
+            )
+            if result.recorded:
+                _write_queue(data, root)
+            return result
+        if worker_liveness(running):
+            return TaskReconciliationResult(
+                outcome="no_op",
+                checked_at=checked_at,
+                task_id=running.id,
+                previous_status=running.status,
+                resulting_status=running.status,
+                evidence=("active-worker",),
+                reason="The authoritative worker is still active.",
+                worker_id=running.worker_id,
+                worker_heartbeat_at=running.worker_heartbeat_at,
+                worker_lease_id=running.worker_lease_id,
+                recorded=False,
+            )
+        terminal_status, terminal_evidence, terminal_conflict = (
+            _terminal_reconciliation_evidence(running)
+        )
+        if terminal_conflict:
+            result = _store_reconciliation(
+                data,
+                TaskReconciliationResult(
+                    outcome="conflict",
+                    checked_at=checked_at,
+                    task_id=running.id,
+                    previous_status=running.status,
+                    resulting_status=running.status,
+                    evidence=terminal_evidence,
+                    reason=terminal_conflict,
+                    worker_id=running.worker_id,
+                    worker_heartbeat_at=running.worker_heartbeat_at,
+                    worker_lease_id=running.worker_lease_id,
+                ),
+            )
+            if result.recorded:
+                _write_queue(data, root)
+            return result
+        if terminal_status:
+            history = _history_jobs(data)
+            if any(job.id == running.id for job in history):
+                result = _store_reconciliation(
+                    data,
+                    TaskReconciliationResult(
+                        outcome="conflict",
+                        checked_at=checked_at,
+                        task_id=running.id,
+                        previous_status=running.status,
+                        resulting_status=running.status,
+                        evidence=terminal_evidence,
+                        reason="Task history already contains the running task id.",
+                        worker_id=running.worker_id,
+                        worker_heartbeat_at=running.worker_heartbeat_at,
+                        worker_lease_id=running.worker_lease_id,
+                    ),
+                )
+                if result.recorded:
+                    _write_queue(data, root)
+                return result
+            finished = _replace_job(
+                running,
+                status=terminal_status,
+                completed_at=checked_at,
+                worker_id="",
+                worker_pid=None,
+                worker_heartbeat_at="",
+                worker_lease_id="",
+                next_attempt_at="",
+            )
+            history.append(finished)
+            result = TaskReconciliationResult(
+                outcome="terminal_repair",
+                checked_at=checked_at,
+                task_id=running.id,
+                previous_status=running.status,
+                resulting_status=finished.status,
+                evidence=terminal_evidence,
+                reason="Durable terminal evidence finalized the running task.",
+                worker_id=running.worker_id,
+                worker_heartbeat_at=running.worker_heartbeat_at,
+                worker_lease_id=running.worker_lease_id,
+            )
+            data["running"] = None
+            data["history"] = [_job_to_dict(job) for job in history]
+            data["reconciliation"] = _reconciliation_to_dict(result)
+            _write_queue(data, root)
+            _record_task_event_safely(
+                finished,
+                finished.status,
+                root,
+                event_actor="system",
+                trigger="reconciliation",
+                result=finished.result,
+            )
+            return result
+        unsupported = _unsupported_reconciliation_evidence(running)
+        if unsupported:
+            result = _store_reconciliation(
+                data,
+                TaskReconciliationResult(
+                    outcome="unsupported_evidence",
+                    checked_at=checked_at,
+                    task_id=running.id,
+                    previous_status=running.status,
+                    resulting_status=running.status,
+                    evidence=unsupported,
+                    reason=(
+                        "Durable evidence exists, but it does not prove a terminal "
+                        "task outcome. Reconciliation failed closed."
+                    ),
+                    worker_id=running.worker_id,
+                    worker_heartbeat_at=running.worker_heartbeat_at,
+                    worker_lease_id=running.worker_lease_id,
+                ),
+            )
+            if result.recorded:
+                _write_queue(data, root)
+            return result
+        if running.attempt >= running.max_attempts:
+            failed = _replace_job(
+                running,
+                status="failed",
+                completed_at=checked_at,
+                result=(
+                    f"Task worker was interrupted and automatic recovery exhausted "
+                    f"{running.max_attempts} attempts."
+                ),
+                worker_id="",
+                worker_pid=None,
+                worker_heartbeat_at="",
+                worker_lease_id="",
+                failure_code="worker_interrupted",
+                failure_class="transient",
+                retryable=False,
+                next_attempt_at="",
+            )
+            history = _history_jobs(data)
+            history.append(failed)
+            result = TaskReconciliationResult(
+                outcome="interrupted_worker_recovery",
+                checked_at=checked_at,
+                task_id=running.id,
+                previous_status=running.status,
+                resulting_status=failed.status,
+                evidence=("inactive-worker", "retry-policy-exhausted"),
+                reason="The inactive worker exhausted bounded recovery attempts.",
+                worker_id=running.worker_id,
+                worker_heartbeat_at=running.worker_heartbeat_at,
+                worker_lease_id=running.worker_lease_id,
+            )
+            data["running"] = None
+            data["history"] = [_job_to_dict(job) for job in history]
+            data["reconciliation"] = _reconciliation_to_dict(result)
+            _write_queue(data, root)
+            _record_task_event_safely(
+                failed,
+                "failed",
+                root,
+                event_actor="system",
+                trigger="recovery-exhausted",
+                result=failed.result,
+            )
+            return result
+        recovered = _replace_job(
+            running,
+            status="pending",
+            started_at="",
+            worker_id="",
+            worker_pid=None,
+            worker_heartbeat_at="",
+            worker_lease_id="",
+            next_attempt_at=_retry_at_from(checked_at, 0),
+            failure_code="worker_interrupted",
+            failure_class="transient",
+            retryable=True,
+        )
+        result = TaskReconciliationResult(
+            outcome="interrupted_worker_recovery",
+            checked_at=checked_at,
+            task_id=running.id,
+            previous_status=running.status,
+            resulting_status=recovered.status,
+            evidence=("inactive-worker", "retry-policy-available"),
+            reason="The inactive worker was returned to the bounded retry queue.",
+            worker_id=running.worker_id,
+            worker_heartbeat_at=running.worker_heartbeat_at,
+            worker_lease_id=running.worker_lease_id,
+        )
+        data["running"] = None
+        data["pending"] = [_job_to_dict(recovered), *[_job_to_dict(job) for job in _pending_jobs(data)]]
+        data["reconciliation"] = _reconciliation_to_dict(result)
+        _write_queue(data, root)
+        _record_task_event_safely(
+            recovered,
+            "retrying",
+            root,
+            event_actor="system",
+            trigger="recovery",
+            result="Task worker was interrupted.",
+        )
+        _record_task_event_safely(
+            recovered,
+            "queued",
+            root,
+            event_actor="system",
+            trigger="recovery",
+            result="Task worker was interrupted.",
+        )
+        return result
+
+
+def task_queue_status(root: Path | None = None) -> TaskQueueStatus:
+    with _queue_transaction(root):
+        data = _load_queue(root)
+        pending = tuple(_pending_jobs(data))
+        paused = tuple(_paused_jobs(data))
+        return TaskQueueStatus(
+            pending_count=len(pending),
+            paused_count=len(paused),
+            running=_parse_job(data.get("running")),
+            pending=pending,
+            paused=paused,
+            history=tuple(_history_jobs(data)),
+            reconciliation=_parse_reconciliation(data.get("reconciliation")),
+        )
+
+
+def task_result_has_review(result: str) -> bool:
+    """Detect legacy forge review URLs embedded in unstructured task output."""
+
+    return bool(LEGACY_REVIEW_URL_PATTERN.search(result))
+
+
+def task_result_has_pull_request(result: str) -> bool:
+    """Compatibility alias for workflow API v1."""
+
+    return task_result_has_review(result)
+
+
+def _job_has_review(job: TaskJob) -> bool:
+    return bool(job.review_urls) or task_result_has_review(job.result)
+
+
+def _job_has_confirmed_published_review(job: TaskJob) -> bool:
+    return bool(
+        job.review_published
+        and (job.review_id or job.review_url)
+    )
+
+
+def _reconciliation_request_mismatch(
+    request: TaskReconciliationRequest | None,
+    running: TaskJob,
+) -> str:
+    if request is None:
+        return ""
+    mismatches = []
+    if request.expected_task_id != running.id:
+        mismatches.append("task")
+    if request.expected_worker_id != running.worker_id:
+        mismatches.append("worker")
+    if request.expected_worker_heartbeat_at != running.worker_heartbeat_at:
+        mismatches.append("lease")
+    if request.expected_worker_lease_id != running.worker_lease_id:
+        mismatches.append("lease-token")
+    if not mismatches:
+        return ""
+    return (
+        "The running task no longer matches the expected "
+        + ", ".join(mismatches)
+        + " identity."
+    )
+
+
+def _terminal_reconciliation_evidence(
+    running: TaskJob,
+) -> tuple[str, tuple[str, ...], str]:
+    statuses: dict[str, list[str]] = {}
+    if running.terminal_status:
+        if running.terminal_evidence_source and running.terminal_evidence_at:
+            statuses.setdefault(running.terminal_status, []).append(
+                f"terminal-evidence:{running.terminal_evidence_source}"
+            )
+        elif _job_has_confirmed_published_review(running):
+            return (
+                "",
+                ("terminal-evidence:incomplete", "published-review"),
+                "Incomplete terminal evidence conflicts with a published review.",
+            )
+    if _job_has_confirmed_published_review(running):
+        statuses.setdefault("completed", []).append("published-review")
+    evidence = tuple(
+        item
+        for status_evidence in statuses.values()
+        for item in status_evidence
+    )
+    if len(statuses) > 1:
+        return "", evidence, "Durable terminal evidence has conflicting outcomes."
+    if not statuses:
+        return "", (), ""
+    status = next(iter(statuses))
+    if status not in {"completed", "failed", "cancelled"}:
+        return "", evidence, f"Unsupported terminal status {status!r}."
+    return status, evidence, ""
+
+
+def _unsupported_reconciliation_evidence(running: TaskJob) -> tuple[str, ...]:
+    evidence = []
+    if running.terminal_status and (
+        not running.terminal_evidence_source or not running.terminal_evidence_at
+    ):
+        evidence.append("terminal-evidence:incomplete")
+    if running.publish_stage and running.publish_stage not in {
+        "validated",
+        "committed",
+        "pushed",
+        "pr_opened",
+        "captured",
+        "review_published",
+    }:
+        evidence.append(f"publish-stage:{running.publish_stage}")
+    if (
+        running.publish_stage == "review_published" or running.review_published
+    ) and not _job_has_confirmed_published_review(running):
+        evidence.append("published-review:incomplete")
+    if (
+        (running.review_id or running.review_url)
+        and not running.review_published
+    ):
+        evidence.append("unconfirmed-review")
+    return _dedupe_strings(tuple(evidence))
+
+
+def _store_reconciliation(
+    data: dict,
+    result: TaskReconciliationResult,
+) -> TaskReconciliationResult:
+    previous = _parse_reconciliation(data.get("reconciliation"))
+    if previous is not None and _same_reconciliation(previous, result):
+        return TaskReconciliationResult(
+            outcome=result.outcome,
+            checked_at=previous.checked_at,
+            task_id=result.task_id,
+            previous_status=result.previous_status,
+            resulting_status=result.resulting_status,
+            evidence=result.evidence,
+            reason=result.reason,
+            worker_id=result.worker_id,
+            worker_heartbeat_at=result.worker_heartbeat_at,
+            worker_lease_id=result.worker_lease_id,
+            recorded=False,
+        )
+    data["reconciliation"] = _reconciliation_to_dict(result)
+    return result
+
+
+def _same_reconciliation(
+    first: TaskReconciliationResult,
+    second: TaskReconciliationResult,
+) -> bool:
+    return (
+        first.outcome == second.outcome
+        and first.task_id == second.task_id
+        and first.previous_status == second.previous_status
+        and first.resulting_status == second.resulting_status
+        and first.evidence == second.evidence
+        and first.reason == second.reason
+        and first.worker_id == second.worker_id
+        and first.worker_heartbeat_at == second.worker_heartbeat_at
+        and first.worker_lease_id == second.worker_lease_id
+    )
+
+
+def _load_queue(root: Path | None = None) -> dict:
+    path = task_queue_path(root)
+    raw = load_json_object(path, default_factory=_empty_queue)
+    for key in ("pending", "paused", "history"):
+        if key in raw and not isinstance(raw[key], list):
+            raise StateCorruptionError(path, f"expected {key} to be a list")
+        if any(_parse_job(item) is None for item in raw.get(key, [])):
+            raise StateCorruptionError(path, f"found an invalid task in {key}")
+    if raw.get("running") is not None and not isinstance(raw.get("running"), dict):
+        raise StateCorruptionError(path, "expected running to be an object or null")
+    if isinstance(raw.get("running"), dict) and _parse_job(raw["running"]) is None:
+        raise StateCorruptionError(path, "found an invalid running task")
+    if raw.get("reconciliation") is not None and _parse_reconciliation(
+        raw.get("reconciliation")
+    ) is None:
+        raise StateCorruptionError(path, "found an invalid reconciliation record")
+    pending = [_job_to_dict(job) for job in _pending_jobs(raw)]
+    paused_jobs = _paused_jobs(raw)
+    paused = [_job_to_dict(job) for job in paused_jobs]
+    running = _parse_job(raw.get("running"))
+    next_id = _int(raw.get("next_id"), default=1)
+    max_id = max([job["id"] for job in pending], default=0)
+    if running is not None:
+        max_id = max(max_id, running.id)
+    if paused_jobs:
+        max_id = max(max_id, max(job.id for job in paused_jobs))
+    history_jobs = _history_jobs(raw)
+    history = [_job_to_dict(job) for job in history_jobs]
+    if history_jobs:
+        max_id = max(max_id, max(job.id for job in history_jobs))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "next_id": max(next_id, max_id + 1),
+        "pending": pending,
+        "paused": paused,
+        "running": _job_to_dict(running) if running is not None else None,
+        "history": history,
+        "reconciliation": _reconciliation_to_dict(
+            _parse_reconciliation(raw.get("reconciliation"))
+        ),
+    }
+
+
+def _write_queue(data: dict, root: Path | None = None) -> None:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "next_id": _next_id(data),
+        "pending": [_job_to_dict(job) for job in _pending_jobs(data)],
+        "paused": [_job_to_dict(job) for job in _paused_jobs(data)],
+        "running": _job_to_dict(_parse_job(data.get("running"))) if _parse_job(data.get("running")) else None,
+        "history": [_job_to_dict(job) for job in _history_jobs(data)],
+        "reconciliation": _reconciliation_to_dict(
+            _parse_reconciliation(data.get("reconciliation"))
+        ),
+    }
+    atomic_write(task_queue_path(root), json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _queue_transaction(root: Path | None = None):
+    return file_transaction(task_queue_path(root))
+
+
+def _pending_jobs(data: dict) -> list[TaskJob]:
+    raw = data.get("pending")
+    if not isinstance(raw, list):
+        return []
+    jobs = [_parse_job(item) for item in raw]
+    return [job for job in jobs if job is not None]
+
+
+def _paused_jobs(data: dict) -> list[TaskJob]:
+    raw = data.get("paused")
+    if not isinstance(raw, list):
+        return []
+    jobs = [_parse_job(item) for item in raw]
+    return [job for job in jobs if job is not None]
+
+
+def _history_jobs(data: dict) -> list[TaskJob]:
+    raw = data.get("history")
+    if not isinstance(raw, list):
+        return []
+    jobs = [_parse_job(item) for item in raw]
+    return [job for job in jobs if job is not None]
+
+
+def _find_task(data: dict, task_id: int | None) -> TaskJob | None:
+    if task_id is None:
+        return None
+    running = _parse_job(data.get("running"))
+    for job in [
+        *(_pending_jobs(data)),
+        *(_paused_jobs(data)),
+        *([running] if running is not None else []),
+        *(_history_jobs(data)),
+    ]:
+        if job.id == task_id:
+            return job
+    return None
+
+
+def _find_task_by_idempotency_key(data: dict, key: str) -> TaskJob | None:
+    normalized = key.strip()
+    if not normalized:
+        return None
+    running = _parse_job(data.get("running"))
+    return next(
+        (
+            job
+            for job in [
+                *_pending_jobs(data),
+                *_paused_jobs(data),
+                *([running] if running is not None else []),
+                *_history_jobs(data),
+            ]
+            if job.idempotency_key == normalized
+        ),
+        None,
+    )
+
+
+def _find_task_in_status(task_id: int, root: Path | None = None) -> TaskJob | None:
+    with _queue_transaction(root):
+        return _find_task(_load_queue(root), task_id)
+
+
+def _parse_reconciliation(raw: object) -> TaskReconciliationResult | None:
+    if not isinstance(raw, dict):
+        return None
+    outcome = str(raw.get("outcome") or "").strip()
+    if outcome not in {
+        "no_op",
+        "terminal_repair",
+        "interrupted_worker_recovery",
+        "conflict",
+        "unsupported_evidence",
+    }:
+        return None
+    task_id = _positive_int(raw.get("task_id"))
+    checked_at = str(raw.get("checked_at") or "").strip()
+    if not checked_at:
+        return None
+    return TaskReconciliationResult(
+        outcome=outcome,
+        checked_at=checked_at,
+        task_id=task_id,
+        previous_status=str(raw.get("previous_status") or "").strip(),
+        resulting_status=str(raw.get("resulting_status") or "").strip(),
+        evidence=_parse_string_tuple(raw.get("evidence")),
+        reason=str(raw.get("reason") or "").strip(),
+        worker_id=str(raw.get("worker_id") or "").strip(),
+        worker_heartbeat_at=str(raw.get("worker_heartbeat_at") or "").strip(),
+        worker_lease_id=str(raw.get("worker_lease_id") or "").strip(),
+    )
+
+
+def _reconciliation_to_dict(
+    result: TaskReconciliationResult | None,
+) -> dict | None:
+    if result is None:
+        return None
+    return {
+        "outcome": result.outcome,
+        "checked_at": result.checked_at,
+        "task_id": result.task_id,
+        "previous_status": result.previous_status,
+        "resulting_status": result.resulting_status,
+        "evidence": list(result.evidence),
+        "reason": result.reason,
+        "worker_id": result.worker_id,
+        "worker_heartbeat_at": result.worker_heartbeat_at,
+        "worker_lease_id": result.worker_lease_id,
+    }
+
+
+def _parse_job(raw: object) -> TaskJob | None:
+    if not isinstance(raw, dict):
+        return None
+    task_id = _int(raw.get("id"))
+    chat_id = normalize_conversation_id(raw.get("chat_id"))
+    text = str(raw.get("text") or "").strip()
+    created_at = str(raw.get("created_at") or "").strip()
+    started_at = str(raw.get("started_at") or "").strip()
+    completed_at = str(raw.get("completed_at") or "").strip()
+    status = str(raw.get("status") or "").strip() or "pending"
+    status_message_id = normalize_message_id(raw.get("status_message_id"))
+    result = str(raw.get("result") or "").strip()
+    review_urls = _parse_review_urls(
+        raw.get("review_urls", raw.get("pr_urls"))
+    )
+    review_urls = _merge_review_urls(review_urls, _review_urls(result))
+    context = str(raw.get("context") or "").strip()
+    context_source = str(raw.get("context_source") or "").strip()
+    try:
+        source = normalize_task_source(str(raw.get("source") or "task"))
+        initiated_by = normalize_task_initiator(str(raw.get("initiated_by") or "human"))
+    except ValueError:
+        source = "task"
+        initiated_by = "human"
+    trigger = str(raw.get("trigger") or "").strip()
+    candidate_id = str(raw.get("candidate_id") or "").strip()
+    parent_task_id = _positive_int(raw.get("parent_task_id"))
+    evidence_source = str(raw.get("evidence_source") or "").strip().lower()
+    signal_actor = _normalize_provenance_actor(str(raw.get("signal_actor") or ""))
+    candidate_actor = _normalize_provenance_actor(str(raw.get("candidate_actor") or ""))
+    approval_actor = _normalize_provenance_actor(str(raw.get("approval_actor") or ""))
+    parent_candidate_id = str(raw.get("parent_candidate_id") or "").strip()
+    source_task_id = _positive_int(raw.get("source_task_id"))
+    worker_id = str(raw.get("worker_id") or "").strip()
+    worker_pid = _optional_int(raw.get("worker_pid"))
+    worker_heartbeat_at = str(raw.get("worker_heartbeat_at") or "").strip()
+    worker_lease_id = str(raw.get("worker_lease_id") or "").strip()
+    workspace_path = str(
+        raw.get("workspace_path", raw.get("worktree_path")) or ""
+    ).strip()
+    workspace_id = str(
+        raw.get("workspace_id")
+        or raw.get("branch_name")
+        or raw.get("remote_branch")
+        or ""
+    ).strip()
+    attempt_default = 1 if status in {"running", "paused"} else 0
+    attempt = max(0, _int(raw.get("attempt"), default=attempt_default))
+    max_attempts = max(1, _int(raw.get("max_attempts"), default=DEFAULT_MAX_ATTEMPTS))
+    timeout_seconds = _positive_int(raw.get("timeout_seconds"))
+    try:
+        required_capabilities = TaskRequirements(
+            _parse_string_tuple(raw.get("required_capabilities"))
+        ).capabilities
+    except ValueError:
+        required_capabilities = ()
+    try:
+        extension_metadata = normalize_extension_metadata(
+            raw.get("extension_metadata")
+        )
+        extension_artifact_refs = extension_artifact_references_from_json(
+            raw.get("extension_artifact_refs")
+        )
+        require_extension_payload_namespace(
+            context_source,
+            extension_metadata,
+            extension_artifact_refs,
+        )
+        execution_lane = require_extension_lane_namespace(
+            context_source,
+            raw.get("execution_lane"),
+        )
+    except ValueError:
+        return None
+    next_attempt_at = str(raw.get("next_attempt_at") or "").strip()
+    failure_code = str(raw.get("failure_code") or "").strip()
+    failure_class = str(raw.get("failure_class") or "").strip()
+    retryable = bool(raw.get("retryable", False))
+    runtime_provider = str(raw.get("runtime_provider") or "").strip().lower()
+    runtime_session_id = str(raw.get("runtime_session_id") or "").strip()
+    runtime_completion_reason = str(
+        raw.get("runtime_completion_reason") or ""
+    ).strip().lower()
+    runtime_usage = _parse_runtime_usage(raw.get("runtime_usage"))
+    runtime_event_types = _parse_string_tuple(raw.get("runtime_event_types"))
+    runtime_output_refs = _parse_string_tuple(raw.get("runtime_output_refs"))
+    runtime_side_effects = _parse_string_tuple(raw.get("runtime_side_effects"))
+    idempotency_key = str(raw.get("idempotency_key") or "").strip()
+    publish_stage = str(raw.get("publish_stage") or "").strip()
+    revision_id = str(
+        raw.get("revision_id", raw.get("commit_sha")) or ""
+    ).strip()
+    review_id = str(raw.get("review_id") or "").strip()
+    review_url = str(raw.get("review_url", raw.get("pr_url")) or "").strip()
+    review_urls = _merge_review_urls(
+        review_urls,
+        (review_url,) if review_url else (),
+    )
+    raw_review_published = raw.get(
+        "review_published",
+        raw.get("published_remotely"),
+    )
+    review_published = (
+        bool(review_url)
+        if raw_review_published is None
+        else bool(raw_review_published)
+    )
+    terminal_status = str(raw.get("terminal_status") or "").strip().lower()
+    terminal_evidence_source = str(
+        raw.get("terminal_evidence_source") or ""
+    ).strip().lower()
+    terminal_evidence_at = str(raw.get("terminal_evidence_at") or "").strip()
+    if terminal_status and terminal_status not in {
+        "completed",
+        "failed",
+        "cancelled",
+    }:
+        return None
+    if candidate_id:
+        evidence_source = evidence_source or source
+        signal_actor = signal_actor or _legacy_signal_actor(evidence_source)
+        candidate_actor = candidate_actor or "agent"
+        approval_actor = approval_actor or _legacy_approval_actor(trigger, context_source, initiated_by)
+    if task_id <= 0 or chat_id is None or not text:
+        return None
+    return TaskJob(
+        id=task_id,
+        chat_id=chat_id,
+        text=text,
+        created_at=created_at,
+        started_at=started_at,
+        completed_at=completed_at,
+        status=status,
+        status_message_id=status_message_id,
+        result=result,
+        review_urls=review_urls,
+        context=context,
+        context_source=context_source,
+        source=source,
+        initiated_by=initiated_by,
+        trigger=trigger,
+        candidate_id=candidate_id,
+        parent_task_id=parent_task_id,
+        evidence_source=evidence_source,
+        signal_actor=signal_actor,
+        candidate_actor=candidate_actor,
+        approval_actor=approval_actor,
+        parent_candidate_id=parent_candidate_id,
+        source_task_id=source_task_id,
+        worker_id=worker_id,
+        worker_pid=worker_pid,
+        worker_heartbeat_at=worker_heartbeat_at,
+        worker_lease_id=worker_lease_id,
+        workspace_path=workspace_path,
+        workspace_id=workspace_id,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        timeout_seconds=timeout_seconds,
+        required_capabilities=required_capabilities,
+        extension_metadata=extension_metadata,
+        extension_artifact_refs=extension_artifact_refs,
+        execution_lane=execution_lane,
+        next_attempt_at=next_attempt_at,
+        failure_code=failure_code,
+        failure_class=failure_class,
+        retryable=retryable,
+        runtime_provider=runtime_provider,
+        runtime_session_id=runtime_session_id,
+        runtime_completion_reason=runtime_completion_reason,
+        runtime_usage=runtime_usage,
+        runtime_event_types=runtime_event_types,
+        runtime_output_refs=runtime_output_refs,
+        runtime_side_effects=runtime_side_effects,
+        idempotency_key=idempotency_key,
+        publish_stage=publish_stage,
+        revision_id=revision_id,
+        review_id=review_id,
+        review_url=review_url,
+        review_published=review_published,
+        terminal_status=terminal_status,
+        terminal_evidence_source=terminal_evidence_source,
+        terminal_evidence_at=terminal_evidence_at,
+    )
+
+
+def _job_to_dict(job: TaskJob | None) -> dict:
+    if job is None:
+        return {}
+    return {
+        "id": job.id,
+        "chat_id": job.chat_id,
+        "text": job.text,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+        "status": job.status,
+        "status_message_id": job.status_message_id,
+        "result": job.result,
+        "review_urls": list(job.review_urls),
+        "context": job.context,
+        "context_source": job.context_source,
+        "source": job.source,
+        "initiated_by": job.initiated_by,
+        "trigger": job.trigger,
+        "candidate_id": job.candidate_id,
+        "parent_task_id": job.parent_task_id,
+        "evidence_source": job.evidence_source,
+        "signal_actor": job.signal_actor,
+        "candidate_actor": job.candidate_actor,
+        "approval_actor": job.approval_actor,
+        "parent_candidate_id": job.parent_candidate_id,
+        "source_task_id": job.source_task_id,
+        "worker_id": job.worker_id,
+        "worker_pid": job.worker_pid,
+        "worker_heartbeat_at": job.worker_heartbeat_at,
+        "worker_lease_id": job.worker_lease_id,
+        "workspace_path": job.workspace_path,
+        "workspace_id": job.workspace_id,
+        "attempt": job.attempt,
+        "max_attempts": job.max_attempts,
+        "timeout_seconds": job.timeout_seconds,
+        "required_capabilities": list(job.required_capabilities),
+        "extension_metadata": normalize_extension_metadata(
+            job.extension_metadata
+        ),
+        "extension_artifact_refs": extension_artifact_references_to_json(
+            job.extension_artifact_refs
+        ),
+        "execution_lane": job.execution_lane,
+        "next_attempt_at": job.next_attempt_at,
+        "failure_code": job.failure_code,
+        "failure_class": job.failure_class,
+        "retryable": job.retryable,
+        "runtime_provider": job.runtime_provider,
+        "runtime_session_id": job.runtime_session_id,
+        "runtime_completion_reason": job.runtime_completion_reason,
+        "runtime_usage": job.runtime_usage,
+        "runtime_event_types": list(job.runtime_event_types),
+        "runtime_output_refs": list(job.runtime_output_refs),
+        "runtime_side_effects": list(job.runtime_side_effects),
+        "idempotency_key": job.idempotency_key,
+        "publish_stage": job.publish_stage,
+        "revision_id": job.revision_id,
+        "review_id": job.review_id,
+        "review_url": job.review_url,
+        "review_published": job.review_published,
+        "terminal_status": job.terminal_status,
+        "terminal_evidence_source": job.terminal_evidence_source,
+        "terminal_evidence_at": job.terminal_evidence_at,
+    }
+
+
+def _replace_job(job: TaskJob, **changes: object) -> TaskJob:
+    values = {
+        "id": job.id,
+        "chat_id": job.chat_id,
+        "text": job.text,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+        "status": job.status,
+        "status_message_id": job.status_message_id,
+        "result": job.result,
+        "review_urls": job.review_urls,
+        "context": job.context,
+        "context_source": job.context_source,
+        "source": job.source,
+        "initiated_by": job.initiated_by,
+        "trigger": job.trigger,
+        "candidate_id": job.candidate_id,
+        "parent_task_id": job.parent_task_id,
+        "evidence_source": job.evidence_source,
+        "signal_actor": job.signal_actor,
+        "candidate_actor": job.candidate_actor,
+        "approval_actor": job.approval_actor,
+        "parent_candidate_id": job.parent_candidate_id,
+        "source_task_id": job.source_task_id,
+        "worker_id": job.worker_id,
+        "worker_pid": job.worker_pid,
+        "worker_heartbeat_at": job.worker_heartbeat_at,
+        "worker_lease_id": job.worker_lease_id,
+        "workspace_path": job.workspace_path,
+        "workspace_id": job.workspace_id,
+        "attempt": job.attempt,
+        "max_attempts": job.max_attempts,
+        "timeout_seconds": job.timeout_seconds,
+        "required_capabilities": job.required_capabilities,
+        "extension_metadata": normalize_extension_metadata(
+            job.extension_metadata
+        ),
+        "extension_artifact_refs": job.extension_artifact_refs,
+        "execution_lane": job.execution_lane,
+        "next_attempt_at": job.next_attempt_at,
+        "failure_code": job.failure_code,
+        "failure_class": job.failure_class,
+        "retryable": job.retryable,
+        "runtime_provider": job.runtime_provider,
+        "runtime_session_id": job.runtime_session_id,
+        "runtime_completion_reason": job.runtime_completion_reason,
+        "runtime_usage": job.runtime_usage,
+        "runtime_event_types": job.runtime_event_types,
+        "runtime_output_refs": job.runtime_output_refs,
+        "runtime_side_effects": job.runtime_side_effects,
+        "idempotency_key": job.idempotency_key,
+        "publish_stage": job.publish_stage,
+        "revision_id": job.revision_id,
+        "review_id": job.review_id,
+        "review_url": job.review_url,
+        "review_published": job.review_published,
+        "terminal_status": job.terminal_status,
+        "terminal_evidence_source": job.terminal_evidence_source,
+        "terminal_evidence_at": job.terminal_evidence_at,
+    }
+    values.update(changes)
+    return TaskJob(**values)
+
+
+def _next_id(data: dict) -> int:
+    return max(1, _int(data.get("next_id"), default=1))
+
+
+def _int(value: object, *, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed
+
+
+def _optional_int(value: object) -> int | None:
+    parsed = _int(value)
+    return parsed if parsed > 0 else None
+
+
+def _required_positive_int(value: object, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a positive integer.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} must be a positive integer.") from error
+    if parsed <= 0:
+        raise ValueError(f"{label} must be a positive integer.")
+    return parsed
+
+
+def _optional_positive_int(value: object, label: str) -> int | None:
+    if value is None:
+        return None
+    return _required_positive_int(value, label)
+
+
+def _parse_runtime_usage(value: object) -> dict[str, int]:
+    keys = (
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+    )
+    if not isinstance(value, dict) or not any(key in value for key in keys):
+        return {}
+    return {key: max(0, _int(value.get(key))) for key in keys}
+
+
+def _parse_string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return _dedupe_strings(tuple(str(item) for item in value))
+
+
+def _dedupe_strings(values: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return tuple(result)
+
+
+def _normalize_provenance_actor(value: str) -> str:
+    normalized = " ".join(value.split()).lower()
+    return normalized if normalized in {"human", "agent", "system"} else ""
+
+
+def _legacy_signal_actor(source: str) -> str:
+    if source in {"backlog", "feedback", "learning"}:
+        return "human"
+    if source in {"inheritance", "brainstorming"}:
+        return "agent"
+    return "system"
+
+
+def _legacy_approval_actor(trigger: str, context_source: str, initiated_by: str) -> str:
+    if trigger.startswith("/evolve ") or context_source in {"evolve-approve", "evolve-retry"}:
+        return "human"
+    if context_source == "evolve-scheduler":
+        return "agent"
+    return initiated_by
+
+
+def _positive_int(value: object) -> int | None:
+    parsed = _int(value)
+    return parsed if parsed > 0 else None
+
+
+def _retry_at(delay_seconds: int) -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        + timedelta(seconds=max(0, delay_seconds))
+    ).isoformat()
+
+
+def _retry_at_from(timestamp: str, delay_seconds: int) -> str:
+    try:
+        base = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return _retry_at(delay_seconds)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    return (
+        base.replace(microsecond=0)
+        + timedelta(seconds=max(0, delay_seconds))
+    ).isoformat()
+
+
+def _task_is_due(job: TaskJob) -> bool:
+    if not job.next_attempt_at:
+        return True
+    try:
+        due = datetime.fromisoformat(job.next_attempt_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    return due <= datetime.now(timezone.utc)
+
+
+def _lane_predecessors_finished(
+    job: TaskJob,
+    predecessors: list[TaskJob],
+    blocked_lanes: set[str],
+) -> bool:
+    if not job.execution_lane:
+        return True
+    return (
+        job.execution_lane not in blocked_lanes
+        and all(
+            predecessor.execution_lane != job.execution_lane
+            for predecessor in predecessors
+        )
+    )
+
+
+def _review_urls(result: str) -> tuple[str, ...]:
+    return tuple(LEGACY_REVIEW_URL_PATTERN.findall(result))
+
+
+def _record_task_event_safely(
+    job: TaskJob,
+    event: str,
+    root: Path | None,
+    *,
+    event_actor: str,
+    trigger: str,
+    result: str = "",
+    related_task_id: int | None = None,
+) -> None:
+    try:
+        record_task_event(
+            job,
+            event,
+            root,
+            event_actor=event_actor,
+            trigger=trigger,
+            result=result,
+            related_task_id=related_task_id,
+        )
+    except (OSError, ValueError):
+        return
+
+
+def _parse_review_urls(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    urls = []
+    for item in raw:
+        url = str(item or "").strip()
+        parsed = urlsplit(url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            urls.append(url)
+    return _merge_review_urls(tuple(urls))
+
+
+def _merge_review_urls(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    merged: list[str] = []
+    for group in groups:
+        for url in group:
+            if url not in merged:
+                merged.append(url)
+    return tuple(merged)
+
+
+def _empty_queue() -> dict:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "next_id": 1,
+        "pending": [],
+        "paused": [],
+        "running": None,
+        "history": [],
+        "reconciliation": None,
+    }

@@ -1,0 +1,346 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from importlib import resources
+from pathlib import Path
+
+from ruth.runtime_dependencies import activate_runtime_dependencies
+from ruth.providers.contracts import ForgeProviderError
+from ruth.providers.registry import ProviderError, load_provider
+
+
+activate_runtime_dependencies()
+
+from our_ark_skill_catalog import (  # noqa: E402
+    AgentSkills,
+    SkillInfo,
+    parse_agent_catalog,
+    parse_simple_yaml,
+)
+
+
+class SkillsError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class PublishedSource:
+    agent: str
+    repository: str
+    branch: str
+    revision: str
+    browse_url: str = ""
+
+    def skill_url(self, path: str) -> str:
+        cleaned = path.strip().strip("/")
+        if not self.browse_url or not cleaned:
+            return ""
+        return f"{self.browse_url.rstrip('/')}/{cleaned}"
+
+
+_parse_simple_yaml = parse_simple_yaml
+
+
+def skills_command(text: str, root: Path, *, prefix: str = "/") -> str:
+    target = _target_argument(text, prefix=prefix)
+    try:
+        if _is_published_agent_target(target):
+            source = resolve_published_source(target, root=root)
+            agent = _load_published_agent_skills(
+                target.strip().lower(),
+                root=root,
+                source=source,
+            )
+            return format_agent_skills(agent, source=source)
+        agent = load_agent_skills(target, root=root)
+    except SkillsError as error:
+        return f"Ruth could not inspect skills: {error}"
+    return format_agent_skills(agent)
+
+
+def load_agent_skills(target: str = "", *, root: Path | None = None) -> AgentSkills:
+    if _is_published_agent_target(target):
+        source = resolve_published_source(target, root=root)
+        return _load_published_agent_skills(
+            target.strip().lower(),
+            root=root,
+            source=source,
+        )
+
+    agent_root = resolve_agent_root(target, root=root)
+    body_path = _body_path(agent_root)
+    if body_path is None:
+        if not _is_self_target(target):
+            raise SkillsError(
+                f"Could not find a body.yaml or legacy identity.yaml under {agent_root}."
+            )
+        identity_text = _package_text("body.yaml")
+        package_mode = True
+    else:
+        identity_text = body_path.read_text(encoding="utf-8")
+        package_mode = False
+
+    return parse_agent_catalog(
+        identity_text,
+        agent_root,
+        lambda path: _skill_metadata_text(
+            agent_root,
+            path,
+            package_mode=package_mode,
+        ),
+    )
+
+
+def resolve_agent_root(target: str = "", *, root: Path | None = None) -> Path:
+    current = Path(root or Path.cwd()).resolve()
+    target = target.strip()
+    if _is_self_target(target):
+        return current
+    path = Path(target).expanduser()
+    if not path.is_absolute():
+        path = current / path
+    return path.resolve()
+
+
+def _is_path_target(target: str) -> bool:
+    path = Path(target).expanduser()
+    return path.is_absolute() or target.startswith(("~", ".")) or "/" in target
+
+
+def _is_published_agent_target(target: str) -> bool:
+    return bool(target.strip()) and not _is_self_target(target) and not _is_path_target(target.strip())
+
+
+def resolve_published_source(
+    agent: str,
+    *,
+    root: Path | None = None,
+) -> PublishedSource:
+    name = agent.strip().lower()
+    if not name:
+        raise SkillsError("Published agent name is required.")
+    repository = f"our-ark/{name}"
+    branch = "main"
+    try:
+        provider = load_provider("forge", root)
+        latest_commit = getattr(provider, "latest_commit", None)
+        if not callable(latest_commit):
+            raise SkillsError(
+                f"Forge provider {provider.name} cannot resolve immutable published revisions."
+            )
+        revision = str(latest_commit(repository, branch)).strip()
+        if not revision:
+            raise SkillsError(f"Could not resolve {repository}@{branch}.")
+        browse = getattr(provider, "browse_url", None)
+        browse_url = (
+            str(browse(repository, "", revision)).strip()
+            if callable(browse)
+            else _default_published_browse_url(
+                str(getattr(provider, "name", "") or ""),
+                repository,
+                revision,
+            )
+        )
+    except SkillsError:
+        raise
+    except (ProviderError, ForgeProviderError, OSError, TypeError) as error:
+        raise SkillsError(
+            f"Could not resolve published Our-Ark agent {name} from the configured forge."
+        ) from error
+    return PublishedSource(
+        agent=name,
+        repository=repository,
+        branch=branch,
+        revision=revision,
+        browse_url=browse_url,
+    )
+
+
+def _default_published_browse_url(
+    provider_name: str,
+    repository: str,
+    revision: str,
+) -> str:
+    if provider_name.strip().lower() != "github":
+        return ""
+    return f"https://github.com/{repository}/tree/{revision}"
+
+
+def _load_published_agent_skills(
+    name: str,
+    *,
+    root: Path | None = None,
+    source: PublishedSource | None = None,
+) -> AgentSkills:
+    source = source or resolve_published_source(name, root=root)
+    identity_text = _published_body_text(
+        name,
+        root=root,
+        ref=source.revision,
+    )
+    agent_root = Path(f"{source.repository}@{source.revision}")
+    return parse_agent_catalog(
+        identity_text,
+        agent_root,
+        lambda path: _skill_metadata_text(
+            agent_root,
+            path,
+            published_agent=name,
+            published_ref=source.revision,
+            root=root,
+        ),
+    )
+
+
+def format_agent_skills(
+    agent: AgentSkills,
+    *,
+    source: PublishedSource | None = None,
+) -> str:
+    if not agent.skills:
+        return f"{agent.name} has no declared skills."
+
+    lines = [
+        f"{agent.name} skills:",
+        f"Root: {agent.root}",
+        "Declared skills are descriptions for human inspection, not execution permissions.",
+    ]
+    for index, skill in enumerate(agent.skills, start=1):
+        label = f"{skill.name} ({skill.exposure})" if skill.exposure else skill.name
+        lines.append(f"{index}. {label}")
+        if skill.version:
+            lines.append(f"   Version: {skill.version}")
+        if skill.exposure:
+            lines.append(f"   Exposure: {skill.exposure}")
+        summary = skill.summary or skill.description
+        if summary:
+            lines.append(f"   Summary: {summary}")
+        lines.append(f"   Inspect: {skill.path}")
+        if source is not None:
+            link = source.skill_url(skill.path)
+            if link:
+                lines.append(f"   Link: {link}")
+    return "\n".join(lines)
+
+
+def _target_argument(text: str, *, prefix: str) -> str:
+    command = f"{prefix}skills" if prefix else "skills"
+    stripped = text.strip()
+    if stripped.lower() == command:
+        return ""
+    if stripped.lower().startswith(f"{command} "):
+        return stripped[len(command) :].strip()
+    return stripped
+
+
+def _body_path(root: Path) -> Path | None:
+    candidates = [
+        root / "src" / root.name / "body.yaml",
+        root / "body.yaml",
+        root / "src" / root.name / "identity.yaml",
+        root / "identity.yaml",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    for pattern in ("src/*/body.yaml", "src/*/identity.yaml"):
+        matches = sorted(root.glob(pattern))
+        if matches:
+            return matches[0]
+    return None
+
+
+def _published_body_text(
+    name: str,
+    *,
+    root: Path | None,
+    ref: str,
+) -> str:
+    errors: list[SkillsError] = []
+    for filename in ("body.yaml", "identity.yaml"):
+        try:
+            return _published_text(
+                name,
+                f"src/{name}/{filename}",
+                root=root,
+                ref=ref,
+            )
+        except SkillsError as error:
+            errors.append(error)
+    raise errors[-1]
+
+
+def _skill_metadata_text(
+    agent_root: Path,
+    path: str,
+    *,
+    package_mode: bool = False,
+    published_agent: str = "",
+    published_ref: str = "main",
+    root: Path | None = None,
+) -> str | None:
+    if not path:
+        return None
+    if published_agent:
+        try:
+            return _published_text(
+                published_agent,
+                f"{path}/skill.yaml",
+                root=root,
+                ref=published_ref,
+            )
+        except SkillsError:
+            return None
+    metadata_path = agent_root / path / "skill.yaml"
+    if not metadata_path.exists():
+        if package_mode:
+            return _package_skill_metadata_text(path)
+        return None
+    return metadata_path.read_text(encoding="utf-8")
+
+
+def _package_skill_metadata_text(path: str) -> str | None:
+    relative = _package_relative_skill_path(path)
+    if not relative:
+        return None
+    try:
+        return _package_text(f"{relative}/skill.yaml")
+    except (FileNotFoundError, ModuleNotFoundError):
+        return None
+
+
+def _package_relative_skill_path(path: str) -> str:
+    cleaned = path.strip().strip("/")
+    if cleaned.startswith("src/ruth/"):
+        cleaned = cleaned.removeprefix("src/ruth/")
+    if not cleaned.startswith("skills/") or ".." in cleaned.split("/"):
+        return ""
+    return cleaned
+
+
+def _package_text(relative_path: str) -> str:
+    target = resources.files("ruth")
+    for part in relative_path.split("/"):
+        target = target.joinpath(part)
+    return target.read_text(encoding="utf-8")
+
+
+def _published_text(
+    agent: str,
+    path: str,
+    *,
+    root: Path | None = None,
+    ref: str = "main",
+) -> str:
+    try:
+        provider = load_provider("forge", root)
+        reader = getattr(provider, "read_text", None)
+        if not callable(reader):
+            raise SkillsError(f"Forge provider {provider.name} cannot read published files.")
+        return str(reader(f"our-ark/{agent}", path, ref))
+    except (ProviderError, ForgeProviderError, UnicodeDecodeError) as error:
+        raise SkillsError(f"Could not read published Our-Ark agent {agent} from the configured forge.") from error
+
+
+def _is_self_target(target: str) -> bool:
+    return not target.strip() or target.strip().lower() in {"ruth", "self", "me"}

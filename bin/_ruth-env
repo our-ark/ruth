@@ -1,0 +1,39 @@
+ruth_python_supported() {
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+}
+
+ruth_find_python() {
+  local candidate
+
+  if [[ -n "${RUTH_PYTHON:-}" ]]; then
+    if ruth_python_supported "$RUTH_PYTHON"; then
+      printf '%s\n' "$RUTH_PYTHON"
+      return 0
+    fi
+
+    printf 'ruth: RUTH_PYTHON points to an unsupported interpreter: %s\n' "$RUTH_PYTHON" >&2
+    printf 'ruth: Python >= 3.11 is required.\n' >&2
+    return 1
+  fi
+
+  for candidate in python3.13 python3.12 python3.11 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && ruth_python_supported "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  printf 'ruth: Python >= 3.11 is required.\n' >&2
+  printf 'ruth: Install a supported Python or set RUTH_PYTHON to its executable path.\n' >&2
+  return 1
+}
+
+ruth_run_module() {
+  local module="$1"
+  local python
+  shift
+
+  cd "$RUTH_ROOT"
+  python="$(ruth_find_python)" || return 1
+  PYTHONPATH="$RUTH_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" "$python" -m "$module" "$@"
+}

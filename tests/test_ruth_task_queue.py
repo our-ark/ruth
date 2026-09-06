@@ -1,0 +1,1217 @@
+from pathlib import Path
+import json
+import os
+import sys
+import threading
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from ruth.tasks.queue import (
+    TaskPublicationState,
+    TaskReconciliationRequest,
+    TaskRetryError,
+    TaskTerminalEvidence,
+    begin_direct_task,
+    begin_next_task,
+    cancel_task,
+    cancel_running_task,
+    claim_running_task,
+    complete_task,
+    enqueue_task,
+    enqueue_task_front,
+    fail_task,
+    pause_task,
+    reconcile_running_task,
+    recover_interrupted_task,
+    record_task_result,
+    record_task_runtime_result,
+    record_task_publish_state,
+    record_task_publication,
+    record_task_status_message,
+    record_task_terminal_evidence,
+    record_task_worktree,
+    regress_task,
+    resolve_regressed_task,
+    retry_failed_task,
+    retry_running_task,
+    resume_paused_tasks,
+    revert_task,
+    task_result_has_pull_request,
+    task_queue_path,
+    task_queue_status,
+)
+from ruth.providers import (
+    RuntimeEvent,
+    RuntimeOutputReference,
+    RuntimeResult,
+    RuntimeSideEffect,
+    RuntimeUsage,
+)
+from ruth.tasks.events import (
+    load_recent_task_outcomes,
+    load_task_events,
+    task_event_path,
+)
+from ruth.tasks import queue as task_queue
+
+
+class RuthTaskQueueTests(unittest.TestCase):
+    def test_schema_11_queue_is_read_and_rewritten_with_neutral_fields(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = task_queue_path(root)
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 11,
+                        "next_id": 2,
+                        "pending": [
+                            {
+                                "id": 1,
+                                "chat_id": 42,
+                                "text": "resume legacy review",
+                                "created_at": "2026-07-25T00:00:00+00:00",
+                                "worktree_path": str(root / "legacy-workspace"),
+                                "branch_name": "legacy-workspace-id",
+                                "publish_stage": "pr_opened",
+                                "commit_sha": "legacy-revision",
+                                "remote_branch": "legacy-workspace-id",
+                                "pr_url": "https://reviews.example/change/legacy",
+                                "published_remotely": True,
+                            }
+                        ],
+                        "paused": [],
+                        "running": None,
+                        "history": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = task_queue_status(root).pending[0]
+            record_task_result(loaded.id, loaded.result, root)
+            rewritten = json.loads(path.read_text(encoding="utf-8"))
+            persisted = rewritten["pending"][0]
+
+        self.assertEqual(loaded.workspace_id, "legacy-workspace-id")
+        self.assertEqual(loaded.revision_id, "legacy-revision")
+        self.assertEqual(
+            loaded.review_urls,
+            ("https://reviews.example/change/legacy",),
+        )
+        self.assertEqual(loaded.review_url, loaded.review_urls[0])
+        self.assertTrue(loaded.review_published)
+        self.assertEqual(rewritten["schema_version"], 15)
+        self.assertEqual(persisted["workspace_id"], "legacy-workspace-id")
+        self.assertEqual(persisted["revision_id"], "legacy-revision")
+        self.assertEqual(persisted["extension_metadata"], {})
+        self.assertEqual(persisted["extension_artifact_refs"], [])
+        self.assertEqual(persisted["execution_lane"], "")
+        self.assertNotIn("branch_name", persisted)
+        self.assertNotIn("commit_sha", persisted)
+        self.assertNotIn("pr_urls", persisted)
+        self.assertNotIn("pr_url", persisted)
+
+    def test_publication_tracks_arbitrary_review_identity_and_neutral_event_keys(self) -> None:
+        review_url = "https://reviews.example/change/alpha"
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "publish provider-neutral review", root)
+            running = begin_next_task(root)
+            assert running is not None
+            claim_running_task(running.id, "worker-one", os.getpid(), root)
+            recorded = record_task_publication(
+                running.id,
+                "worker-one",
+                TaskPublicationState(
+                    stage="review_published",
+                    revision_id="revision-1",
+                    workspace_id="workspace-1",
+                    review_id="change-alpha",
+                    review_url=review_url,
+                    review_published=True,
+                ),
+                root,
+            )
+            completed = complete_task(
+                queued.id,
+                root,
+                result="Published through an independent review provider.",
+                worker_id="worker-one",
+            )
+            event_payload = json.loads(
+                task_event_path(root).read_text(encoding="utf-8").splitlines()[-1]
+            )
+
+        assert recorded is not None
+        assert completed is not None
+        self.assertEqual(completed.review_id, "change-alpha")
+        self.assertEqual(completed.review_url, review_url)
+        self.assertEqual(completed.review_urls, (review_url,))
+        self.assertEqual(completed.revision_id, "revision-1")
+        self.assertEqual(completed.workspace_id, "workspace-1")
+        self.assertEqual(event_payload["schema_version"], 9)
+        self.assertEqual(event_payload["workspace_id"], "workspace-1")
+        self.assertEqual(event_payload["review_id"], "change-alpha")
+        self.assertEqual(event_payload["review_urls"], [review_url])
+        self.assertEqual(event_payload["revision_id"], "revision-1")
+        self.assertEqual(event_payload["extension_metadata"], {})
+        self.assertEqual(event_payload["extension_artifact_refs"], [])
+        self.assertEqual(event_payload["execution_lane"], "")
+        self.assertNotIn("pr_urls", event_payload)
+        self.assertNotIn("commit_sha", event_payload)
+
+    def test_schema_6_task_event_is_read_with_empty_new_identity_fields(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = task_event_path(root)
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 6,
+                        "id": "event-legacy",
+                        "task_id": 9,
+                        "occurred_at": "2026-07-25T00:00:00+00:00",
+                        "event": "completed",
+                        "source": "task",
+                        "initiated_by": "human",
+                        "event_actor": "agent",
+                        "trigger": "/task",
+                        "request": "complete legacy task",
+                        "review_urls": ["https://reviews.example/change/legacy"],
+                        "revision_id": "legacy-revision",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            event = load_task_events(root)[0]
+
+        self.assertEqual(event.workspace_id, "")
+        self.assertEqual(event.review_id, "")
+        self.assertEqual(event.revision_id, "legacy-revision")
+        self.assertEqual(
+            event.review_urls,
+            ("https://reviews.example/change/legacy",),
+        )
+        self.assertEqual(event.extension_metadata, {})
+        self.assertEqual(event.extension_artifact_refs, ())
+        self.assertEqual(event.execution_lane, "")
+
+    def test_recent_task_outcomes_keep_latest_terminal_state_and_publish_evidence(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = enqueue_task(42, "publish bounded task", root)
+            running = begin_next_task(root)
+            assert running is not None
+            claim_running_task(running.id, "worker-one", os.getpid(), root)
+            record_task_publish_state(
+                running.id,
+                "worker-one",
+                root,
+                stage="review_published",
+                commit_sha="d58edcc",
+                pr_url="https://reviews.example/change-19",
+                published_remotely=True,
+            )
+            complete_task(
+                running.id,
+                root,
+                result=(
+                    "Implemented bounded task.\n"
+                    "Files:\n"
+                    "- src/ruth/evolution/curation.py"
+                ),
+                worker_id="worker-one",
+            )
+            regress_task(first.id, root, result="A regression was confirmed.")
+
+            second = enqueue_task(42, "complete stable task", root)
+            running_second = begin_next_task(root)
+            assert running_second is not None
+            complete_task(running_second.id, root, result="Completed stable task.")
+            outcomes = load_recent_task_outcomes(root)
+            published_event = next(
+                event
+                for event in load_task_events(root, task_id=first.id)
+                if event.event == "completed"
+            )
+
+        self.assertEqual([event.task_id for event in outcomes], [first.id, second.id])
+        self.assertEqual([event.event for event in outcomes], ["regressed", "completed"])
+        self.assertEqual(published_event.publish_stage, "review_published")
+        self.assertEqual(published_event.commit_sha, "d58edcc")
+        self.assertEqual(
+            published_event.changed_files,
+            ("src/ruth/evolution/curation.py",),
+        )
+
+    def test_runtime_result_metadata_is_persisted_in_task_and_event_history(self) -> None:
+        runtime_result = RuntimeResult(
+            final_text="Implemented the task.",
+            session_id="runtime-session-7",
+            usage=RuntimeUsage(
+                input_tokens=100,
+                cached_input_tokens=80,
+                output_tokens=20,
+                reasoning_tokens=5,
+            ),
+            events=(
+                RuntimeEvent("thread.started"),
+                RuntimeEvent("turn.completed"),
+            ),
+            output_refs=(RuntimeOutputReference("artifact", "artifact://task-1"),),
+            side_effects=(RuntimeSideEffect("file", "REPORT.md"),),
+        )
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "record runtime metadata", root)
+            running = begin_next_task(root)
+            assert running is not None
+            record_task_runtime_result(
+                running.id,
+                runtime_result,
+                root,
+                provider="test-runtime",
+            )
+            completed = complete_task(running.id, root, result=runtime_result.final_text)
+            events = load_task_events(root, task_id=queued.id)
+
+        assert completed is not None
+        self.assertEqual(completed.runtime_provider, "test-runtime")
+        self.assertEqual(completed.runtime_session_id, "runtime-session-7")
+        self.assertEqual(completed.runtime_completion_reason, "completed")
+        self.assertEqual(completed.runtime_usage["input_tokens"], 100)
+        self.assertEqual(
+            completed.runtime_event_types,
+            ("thread.started", "turn.completed"),
+        )
+        self.assertEqual(completed.runtime_output_refs, ("artifact:artifact://task-1",))
+        self.assertEqual(completed.runtime_side_effects, ("file:REPORT.md:completed",))
+        completed_event = events[-1]
+        self.assertEqual(completed_event.runtime_session_id, "runtime-session-7")
+        self.assertEqual(completed_event.runtime_usage["output_tokens"], 20)
+        self.assertEqual(completed_event.runtime_event_types[-1], "turn.completed")
+
+    def test_retry_failed_task_creates_new_linked_job_with_provenance(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = enqueue_task(
+                42,
+                "retry this work",
+                root,
+                context="Preserve this context.",
+                context_source="evolve-approve",
+                source="feedback",
+                initiated_by="human",
+                trigger="/evolve approve",
+                candidate_id="feedback-1",
+                evidence_source="feedback",
+                signal_actor="human",
+                candidate_actor="agent",
+                approval_actor="human",
+                parent_candidate_id="feedback-parent",
+                source_task_id=7,
+                max_attempts=1,
+                timeout_seconds=180,
+            )
+            begin_next_task(root)
+            fail_task(original.id, root, result="transient failure")
+
+            retried = retry_failed_task(original.id, root)
+            status = task_queue_status(root)
+            events = load_task_events(root, task_id=retried.id)
+
+        self.assertEqual(retried.id, 2)
+        self.assertEqual(retried.parent_task_id, original.id)
+        self.assertEqual(retried.text, original.text)
+        self.assertEqual(retried.context, original.context)
+        self.assertEqual(retried.context_source, original.context_source)
+        self.assertEqual(retried.source, "feedback")
+        self.assertEqual(retried.initiated_by, "human")
+        self.assertEqual(retried.trigger, "/task retry")
+        self.assertEqual(retried.candidate_id, "feedback-1")
+        self.assertEqual(retried.evidence_source, "feedback")
+        self.assertEqual(retried.signal_actor, "human")
+        self.assertEqual(retried.candidate_actor, "agent")
+        self.assertEqual(retried.approval_actor, "human")
+        self.assertEqual(retried.parent_candidate_id, "feedback-parent")
+        self.assertEqual(retried.source_task_id, 7)
+        self.assertEqual(retried.max_attempts, 1)
+        self.assertEqual(retried.timeout_seconds, 180)
+        self.assertEqual(status.history[0].status, "failed")
+        self.assertEqual(status.pending, (retried,))
+        self.assertEqual([event.event for event in events], ["created", "queued"])
+        self.assertEqual([event.event_actor for event in events], ["human", "human"])
+
+    def test_retry_preserves_recoverable_branch_and_reconciled_pr(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = enqueue_task(42, "publish existing work", root)
+            running = begin_next_task(root)
+            claim_running_task(running.id, "worker-one", os.getpid(), root)
+            record_task_worktree(
+                running.id,
+                "worker-one",
+                root / "task-worktree",
+                "ruth/task-1",
+                root,
+            )
+            record_task_publish_state(
+                running.id,
+                "worker-one",
+                root,
+                stage="pushed",
+                commit_sha="abc123",
+                remote_branch="ruth/task-1",
+                published_remotely=True,
+            )
+            fail_task(
+                running.id,
+                root,
+                result="Worker stopped before recording its PR.",
+                worker_id="worker-one",
+            )
+
+            retried = retry_failed_task(
+                original.id,
+                root,
+                reconciled_result=(
+                    "Existing work is available at "
+                    "https://github.com/our-ark/ruth/pull/13"
+                ),
+            )
+
+        self.assertEqual(retried.branch_name, "ruth/task-1")
+        self.assertEqual(
+            retried.worktree_path,
+            str((root / "task-worktree").resolve()),
+        )
+        self.assertEqual(
+            retried.pr_urls,
+            ("https://github.com/our-ark/ruth/pull/13",),
+        )
+        self.assertEqual(retried.publish_stage, "pushed")
+        self.assertEqual(retried.commit_sha, "abc123")
+        self.assertEqual(retried.remote_branch, "ruth/task-1")
+        self.assertTrue(retried.published_remotely)
+        self.assertIn("Existing work is available", retried.result)
+
+    def test_retry_requires_latest_failed_task_in_retry_chain(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = enqueue_task(42, "retry chain", root)
+            begin_next_task(root)
+            fail_task(original.id, root, result="first failure")
+            second = retry_failed_task(original.id, root)
+            begin_next_task(root)
+            fail_task(second.id, root, result="second failure")
+
+            with self.assertRaisesRegex(
+                TaskRetryError,
+                "Retry task #2 instead",
+            ):
+                retry_failed_task(original.id, root)
+            third = retry_failed_task(second.id, root)
+
+        self.assertEqual(third.id, 3)
+        self.assertEqual(third.parent_task_id, second.id)
+
+    def test_retry_refuses_non_failed_task(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "not failed", root)
+
+            with self.assertRaisesRegex(TaskRetryError, "not a failed task"):
+                retry_failed_task(queued.id, root)
+
+    def test_cancelled_retry_does_not_block_another_attempt(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = enqueue_task(42, "retry after cancellation", root)
+            begin_next_task(root)
+            fail_task(original.id, root, result="failed")
+            cancelled_retry = retry_failed_task(original.id, root)
+            cancel_task(cancelled_retry.id, root)
+
+            next_retry = retry_failed_task(original.id, root)
+
+        self.assertEqual(next_retry.id, 3)
+        self.assertEqual(next_retry.parent_task_id, original.id)
+
+    def test_begin_direct_task_creates_running_job_without_pending(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            running = begin_direct_task(42, "ship it now", root)
+            status = task_queue_status(root)
+
+        self.assertEqual(running.id, 1)
+        self.assertEqual(running.status, "running")
+        self.assertEqual(running.attempt, 1)
+        self.assertEqual(running.max_attempts, 3)
+        self.assertEqual(status.running, running)
+        self.assertEqual(status.pending, ())
+
+    def test_transient_failure_requeues_same_task_with_attempt_metadata(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "retry network work", root)
+            running = begin_next_task(root)
+
+            retried = retry_running_task(
+                running.id,
+                root,
+                result="Connection reset by peer.",
+                failure_code="network_error",
+                failure_class="transient",
+                delay_seconds=0,
+            )
+            second_attempt = begin_next_task(root)
+            events = load_task_events(root, task_id=queued.id)
+
+        self.assertEqual(retried.status, "pending")
+        self.assertEqual(retried.attempt, 1)
+        self.assertTrue(retried.retryable)
+        self.assertEqual(retried.failure_code, "network_error")
+        self.assertEqual(second_attempt.id, queued.id)
+        self.assertEqual(second_attempt.attempt, 2)
+        self.assertFalse(second_attempt.retryable)
+        self.assertEqual(
+            [event.event for event in events],
+            ["created", "queued", "started", "retrying", "queued", "started"],
+        )
+        retry_event = events[3]
+        self.assertEqual(retry_event.attempt, 1)
+        self.assertEqual(retry_event.max_attempts, 3)
+        self.assertEqual(retry_event.failure_code, "network_error")
+        self.assertEqual(retry_event.failure_class, "transient")
+        self.assertTrue(retry_event.retryable)
+
+    def test_interrupted_worker_fails_after_three_attempts(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "bounded recovery", root)
+
+            for expected_attempt in (1, 2):
+                running = begin_next_task(root)
+                self.assertEqual(running.attempt, expected_attempt)
+                recovered = recover_interrupted_task(root)
+                self.assertEqual(recovered.status, "pending")
+
+            running = begin_next_task(root)
+            self.assertEqual(running.attempt, 3)
+            failed = recover_interrupted_task(root)
+            status = task_queue_status(root)
+            events = load_task_events(root, task_id=queued.id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.failure_code, "worker_interrupted")
+        self.assertEqual(failed.failure_class, "transient")
+        self.assertFalse(failed.retryable)
+        self.assertEqual(status.history[-1], failed)
+        self.assertEqual(
+            [event.event for event in events].count("retrying"),
+            2,
+        )
+        self.assertEqual(events[-1].event, "failed")
+        self.assertEqual(events[-1].trigger, "recovery-exhausted")
+
+    def test_legacy_evolve_task_infers_split_provenance(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = task_queue.task_queue_path(root)
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                """{
+  "schema_version": 2,
+  "next_id": 2,
+  "pending": [{
+    "id": 1,
+    "chat_id": 42,
+    "text": "apply feedback",
+    "created_at": "2026-07-18T00:00:00Z",
+    "source": "feedback",
+    "initiated_by": "human",
+    "trigger": "/evolve approve",
+    "context_source": "evolve-approve",
+    "candidate_id": "feedback-legacy"
+  }],
+  "paused": [],
+  "running": null,
+  "history": []
+}
+""",
+                encoding="utf-8",
+            )
+
+            job = task_queue_status(root).pending[0]
+
+        self.assertEqual(job.evidence_source, "feedback")
+        self.assertEqual(job.signal_actor, "human")
+        self.assertEqual(job.candidate_actor, "agent")
+        self.assertEqual(job.approval_actor, "human")
+
+    def test_begin_direct_task_refuses_existing_running_job(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            begin_direct_task(42, "first", root)
+
+            with self.assertRaisesRegex(RuntimeError, "already running"):
+                begin_direct_task(42, "second", root)
+
+    def test_cancel_pending_task_moves_it_to_history(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = enqueue_task(42, "first task", root)
+            second = enqueue_task(42, "second task", root)
+
+            cancelled = cancel_task(first.id, root)
+            status = task_queue_status(root)
+            events = load_task_events(root, task_id=first.id)
+
+        self.assertEqual(cancelled.id, first.id)
+        self.assertEqual(status.pending, (second,))
+        self.assertEqual(status.history[-1].id, first.id)
+        self.assertEqual(status.history[-1].status, "cancelled")
+        self.assertEqual(events[-1].event, "cancelled")
+        self.assertEqual(events[-1].event_actor, "human")
+
+    def test_pause_running_task_preserves_it_outside_terminal_history(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = enqueue_task(42, "needs Codex", root, context="Keep this context.")
+            second = enqueue_task(42, "wait behind it", root)
+            running = begin_next_task(root)
+
+            paused = pause_task(
+                running.id,
+                root,
+                result="Codex authentication is unavailable.",
+            )
+            status = task_queue_status(root)
+            events = load_task_events(root, task_id=first.id)
+
+        self.assertEqual(paused.id, first.id)
+        self.assertEqual(paused.status, "paused")
+        self.assertEqual(paused.context, "Keep this context.")
+        self.assertIsNone(status.running)
+        self.assertEqual(status.paused, (paused,))
+        self.assertEqual(status.paused_count, 1)
+        self.assertEqual(status.pending, (second,))
+        self.assertEqual(status.history, ())
+        self.assertEqual(events[-1].event, "paused")
+        self.assertEqual(events[-1].event_actor, "system")
+        self.assertEqual(events[-1].trigger, "runtime-unavailable")
+
+    def test_resume_moves_paused_tasks_to_front_with_same_ids(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = enqueue_task(42, "resume me", root)
+            second = enqueue_task(42, "already queued", root)
+            pause_task(begin_next_task(root).id, root, result="No Codex access.")
+
+            resumed = resume_paused_tasks(root)
+            status = task_queue_status(root)
+            events = load_task_events(root, task_id=first.id)
+
+        self.assertEqual([job.id for job in resumed], [first.id])
+        self.assertEqual([job.id for job in status.pending], [first.id, second.id])
+        self.assertEqual(status.paused, ())
+        self.assertEqual(status.paused_count, 0)
+        self.assertEqual(resumed[0].status, "pending")
+        self.assertEqual([event.event for event in events[-2:]], ["paused", "resumed"])
+        self.assertEqual(events[-1].event_actor, "human")
+        self.assertEqual(events[-1].trigger, "/task resume")
+
+    def test_resume_can_select_one_paused_task(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = enqueue_task(42, "first paused task", root)
+            second = enqueue_task(42, "second paused task", root)
+            pause_task(begin_next_task(root).id, root, result="No Codex access.")
+            pause_task(begin_next_task(root).id, root, result="No Codex access.")
+
+            resumed = resume_paused_tasks(
+                root,
+                task_id=second.id,
+                trigger="/task resume",
+            )
+            status = task_queue_status(root)
+            events = load_task_events(root, task_id=second.id)
+
+        self.assertEqual([job.id for job in resumed], [second.id])
+        self.assertEqual([job.id for job in status.pending], [second.id])
+        self.assertEqual([job.id for job in status.paused], [first.id])
+        self.assertEqual(events[-1].event, "resumed")
+        self.assertEqual(events[-1].trigger, "/task resume")
+
+    def test_enqueue_task_front_runs_before_existing_pending_tasks(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = enqueue_task(42, "first task", root)
+            second = enqueue_task(42, "second task", root)
+            urgent = enqueue_task_front(
+                42,
+                "urgent task",
+                root,
+                context="Use the urgent context.",
+                context_source="chat-snapshot",
+            )
+
+            status = task_queue_status(root)
+            running = begin_next_task(root)
+
+        self.assertEqual([job.id for job in status.pending], [urgent.id, first.id, second.id])
+        self.assertEqual(running.id, urgent.id)
+        self.assertEqual(running.context, "Use the urgent context.")
+        self.assertEqual(running.context_source, "chat-snapshot")
+
+    def test_complete_running_task_moves_it_to_history(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "ship it", root)
+            record_task_status_message(queued.id, 2001, root)
+            running = begin_next_task(root)
+
+            complete_task(running.id, root, result="Done.")
+            status = task_queue_status(root)
+
+        self.assertIsNone(status.running)
+        self.assertEqual(status.history[-1].id, queued.id)
+        self.assertEqual(status.history[-1].status, "completed")
+        self.assertEqual(status.history[-1].status_message_id, 2001)
+        self.assertEqual(status.history[-1].result, "Done.")
+        self.assertEqual(status.history[-1].pr_urls, ())
+
+    def test_records_complete_lifecycle_with_source_and_actors(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(
+                42,
+                "adapt a brainstormed improvement",
+                root,
+                source="brainstorming",
+                initiated_by="agent",
+                event_actor="human",
+                trigger="/evolve approve",
+                candidate_id="brainstorm-1",
+                evidence_source="brainstorming",
+                signal_actor="agent",
+                candidate_actor="agent",
+                approval_actor="human",
+            )
+            running = begin_next_task(root)
+
+            complete_task(running.id, root, result="Done.")
+            events = load_task_events(root, task_id=queued.id)
+
+        self.assertEqual([event.event for event in events], ["created", "queued", "started", "completed"])
+        self.assertEqual([event.event_actor for event in events], ["human", "human", "system", "agent"])
+        self.assertTrue(all(event.source == "brainstorming" for event in events))
+        self.assertTrue(all(event.initiated_by == "agent" for event in events))
+        self.assertTrue(all(event.candidate_id == "brainstorm-1" for event in events))
+        self.assertTrue(all(event.evidence_source == "brainstorming" for event in events))
+        self.assertTrue(all(event.signal_actor == "agent" for event in events))
+        self.assertTrue(all(event.candidate_actor == "agent" for event in events))
+        self.assertTrue(all(event.approval_actor == "human" for event in events))
+
+    def test_queued_task_preserves_context_snapshot_through_history(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(
+                42,
+                "do it",
+                root,
+                context="Build the reminders feature discussed earlier.",
+                context_source="chat-snapshot",
+            )
+
+            running = begin_next_task(root)
+            complete_task(running.id, root, result="Done.")
+            status = task_queue_status(root)
+
+        self.assertEqual(queued.context, "Build the reminders feature discussed earlier.")
+        self.assertEqual(running.context, queued.context)
+        self.assertEqual(running.context_source, "chat-snapshot")
+        self.assertEqual(status.history[-1].context, queued.context)
+        self.assertEqual(status.history[-1].context_source, "chat-snapshot")
+
+    def test_direct_task_preserves_context_snapshot(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            running = begin_direct_task(
+                42,
+                "do it now",
+                root,
+                context="Use the approved high reasoning config.",
+                context_source="chat-snapshot",
+            )
+            complete_task(running.id, root, result="Done.")
+            status = task_queue_status(root)
+
+        self.assertEqual(running.context, "Use the approved high reasoning config.")
+        self.assertEqual(status.history[-1].context, running.context)
+        self.assertEqual(status.history[-1].context_source, "chat-snapshot")
+
+    def test_complete_running_task_records_pr_urls_in_history(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "ship it", root)
+            running = begin_next_task(root)
+            result = "Opened pull request: https://github.com/our-ark/ruth/pull/3"
+
+            complete_task(running.id, root, result=result)
+            status = task_queue_status(root)
+
+        self.assertIsNone(status.running)
+        self.assertEqual(status.history[-1].id, queued.id)
+        self.assertEqual(status.history[-1].status, "completed")
+        self.assertEqual(status.history[-1].pr_urls, ("https://github.com/our-ark/ruth/pull/3",))
+
+    def test_enqueue_during_completion_preserves_both_updates(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            running = begin_direct_task(42, "running job", root)
+            original_write = task_queue._write_queue
+            completion_write_started = threading.Event()
+            enqueue_started = threading.Event()
+
+            def delayed_write(data, root_arg=None):
+                if threading.current_thread().name == "complete-thread":
+                    completion_write_started.set()
+                    self.assertTrue(enqueue_started.wait(5))
+                original_write(data, root_arg)
+
+            task_queue._write_queue = delayed_write
+            try:
+                complete_thread = threading.Thread(
+                    target=lambda: complete_task(running.id, root, result="done"),
+                    name="complete-thread",
+                )
+                enqueue_result = []
+                enqueue_thread = threading.Thread(
+                    target=lambda: (enqueue_started.set(), enqueue_result.append(enqueue_task(42, "queued", root))),
+                    name="enqueue-thread",
+                )
+
+                complete_thread.start()
+                self.assertTrue(completion_write_started.wait(5))
+                enqueue_thread.start()
+                complete_thread.join(5)
+                enqueue_thread.join(5)
+            finally:
+                task_queue._write_queue = original_write
+
+            status = task_queue_status(root)
+
+        self.assertFalse(complete_thread.is_alive())
+        self.assertFalse(enqueue_thread.is_alive())
+        self.assertEqual([job.id for job in status.history], [running.id])
+        self.assertEqual([job.id for job in status.pending], [enqueue_result[0].id])
+
+    def test_fail_running_task_moves_it_to_history(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "ship it", root)
+            running = begin_next_task(root)
+
+            fail_task(running.id, root, result="GitHub rejected the push.")
+            status = task_queue_status(root)
+            events = load_task_events(root, task_id=queued.id)
+
+        self.assertIsNone(status.running)
+        self.assertEqual(status.history[-1].id, queued.id)
+        self.assertEqual(status.history[-1].status, "failed")
+        self.assertEqual(status.history[-1].result, "GitHub rejected the push.")
+        self.assertEqual(events[-1].event, "failed")
+        self.assertEqual(events[-1].event_actor, "agent")
+
+    def test_cancel_running_task_moves_it_to_history(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            running = begin_direct_task(42, "stop me", root)
+
+            cancelled = cancel_running_task(root, result="Stopped by /stop.")
+            status = task_queue_status(root)
+            events = load_task_events(root, task_id=running.id)
+
+        self.assertEqual(cancelled.id, running.id)
+        self.assertIsNone(status.running)
+        self.assertEqual(status.history[-1].id, running.id)
+        self.assertEqual(status.history[-1].status, "cancelled")
+        self.assertEqual(status.history[-1].result, "Stopped by /stop.")
+        self.assertEqual(events[-1].event, "cancelled")
+        self.assertEqual(events[-1].trigger, "/stop")
+
+    def test_recover_interrupted_task_requeues_with_status_message(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "resume me", root, context="Resume with chat context.")
+            record_task_status_message(queued.id, 2001, root)
+            begin_next_task(root)
+
+            recovered = recover_interrupted_task(root)
+            status = task_queue_status(root)
+
+        self.assertEqual(recovered.id, queued.id)
+        self.assertEqual(recovered.status, "pending")
+        self.assertEqual(recovered.status_message_id, 2001)
+        self.assertEqual(recovered.context, "Resume with chat context.")
+        self.assertEqual(status.pending[0].id, queued.id)
+
+    def test_reconciliation_repairs_terminal_evidence_once(self) -> None:
+        checked_at = "2026-08-16T21:30:00+00:00"
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            running = begin_direct_task(42, "finish after crash", root)
+            claimed = claim_running_task(running.id, "worker-one", 999_999, root)
+            assert claimed is not None
+            recorded = record_task_terminal_evidence(
+                claimed.id,
+                claimed.worker_id,
+                TaskTerminalEvidence(status="completed", result="done"),
+                root,
+            )
+            assert recorded is not None
+            request = TaskReconciliationRequest(
+                recorded.id,
+                recorded.worker_id,
+                recorded.worker_heartbeat_at,
+                recorded.worker_lease_id,
+            )
+
+            repaired = reconcile_running_task(
+                request,
+                root,
+                worker_liveness=lambda _job: False,
+                checked_at=checked_at,
+            )
+            repeated = reconcile_running_task(
+                root=root,
+                worker_liveness=lambda _job: False,
+                checked_at=checked_at,
+            )
+            status = task_queue_status(root)
+
+        self.assertEqual(repaired.outcome, "terminal_repair")
+        self.assertEqual(repaired.checked_at, checked_at)
+        self.assertEqual(repeated.outcome, "no_op")
+        self.assertEqual(len(status.history), 1)
+        self.assertEqual(status.reconciliation, repaired)
+
+    def test_reconciliation_fails_closed_on_conflicting_or_unsupported_evidence(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            running = begin_direct_task(42, "incomplete review", root)
+            claimed = claim_running_task(running.id, "worker-one", 999_999, root)
+            assert claimed is not None
+            conflict = reconcile_running_task(
+                TaskReconciliationRequest(
+                    claimed.id,
+                    claimed.worker_id,
+                    "stale-lease",
+                    claimed.worker_lease_id,
+                ),
+                root,
+                worker_liveness=lambda _job: False,
+            )
+            record_task_publication(
+                claimed.id,
+                claimed.worker_id,
+                TaskPublicationState(
+                    stage="review_published",
+                    review_published=True,
+                ),
+                root,
+            )
+            unsupported = reconcile_running_task(
+                TaskReconciliationRequest(
+                    claimed.id,
+                    claimed.worker_id,
+                    claimed.worker_heartbeat_at,
+                    claimed.worker_lease_id,
+                ),
+                root,
+                worker_liveness=lambda _job: False,
+            )
+            status = task_queue_status(root)
+
+        self.assertEqual(conflict.outcome, "conflict")
+        self.assertEqual(unsupported.outcome, "unsupported_evidence")
+        self.assertIsNotNone(status.running)
+        self.assertEqual(status.history, ())
+
+    def test_reconciliation_retries_known_nonterminal_progress(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            running = begin_direct_task(42, "resume captured work", root)
+            claimed = claim_running_task(running.id, "worker-one", 999_999, root)
+            assert claimed is not None
+            record_task_runtime_result(
+                claimed.id,
+                RuntimeResult(final_text="runtime finished"),
+                root,
+                provider="fake-runtime",
+            )
+            record_task_publication(
+                claimed.id,
+                claimed.worker_id,
+                TaskPublicationState(stage="committed", revision_id="abc123"),
+                root,
+            )
+
+            recovered = reconcile_running_task(
+                root=root,
+                worker_liveness=lambda _job: False,
+            )
+            status = task_queue_status(root)
+
+        self.assertEqual(recovered.outcome, "interrupted_worker_recovery")
+        self.assertIsNone(status.running)
+        self.assertEqual(status.pending_count, 1)
+        self.assertEqual(status.pending[0].revision_id, "abc123")
+
+    def test_reconciliation_does_not_infer_completion_from_result_url(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "ship it", root)
+            running = begin_next_task(root)
+            result = "Opened pull request: https://github.com/our-ark/ruth/pull/3"
+            record_task_result(running.id, result, root)
+
+            recovered = recover_interrupted_task(root)
+            status = task_queue_status(root)
+
+        self.assertEqual(recovered.id, queued.id)
+        self.assertEqual(recovered.status, "pending")
+        self.assertIsNone(status.running)
+        self.assertEqual(status.pending[0].id, queued.id)
+        self.assertEqual(status.history, ())
+        self.assertTrue(task_result_has_pull_request(status.pending[0].result))
+        self.assertEqual(
+            status.pending[0].pr_urls,
+            ("https://github.com/our-ark/ruth/pull/3",),
+        )
+
+    def test_reconciliation_accepts_structured_published_review_identity(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            running = begin_direct_task(42, "publish review", root)
+            claimed = claim_running_task(running.id, "worker-one", 999_999, root)
+            assert claimed is not None
+            published = record_task_publication(
+                claimed.id,
+                claimed.worker_id,
+                TaskPublicationState(
+                    stage="review_published",
+                    review_id="review-3",
+                    review_published=True,
+                ),
+                root,
+            )
+            assert published is not None
+
+            result = reconcile_running_task(
+                TaskReconciliationRequest(
+                    published.id,
+                    published.worker_id,
+                    published.worker_heartbeat_at,
+                    published.worker_lease_id,
+                ),
+                root,
+                worker_liveness=lambda _job: False,
+            )
+            status = task_queue_status(root)
+
+        self.assertEqual(result.outcome, "terminal_repair")
+        self.assertEqual(status.history[-1].status, "completed")
+
+    def test_reconciliation_fences_same_timestamp_lease_renewal(self) -> None:
+        timestamp = "2026-08-16T21:30:00+00:00"
+        with TemporaryDirectory() as temp, patch(
+            "ruth.tasks.queue.current_time",
+            return_value=timestamp,
+        ):
+            root = Path(temp)
+            running = begin_direct_task(42, "renew lease", root)
+            claimed = claim_running_task(running.id, "worker-one", 999_999, root)
+            assert claimed is not None
+            request = TaskReconciliationRequest(
+                claimed.id,
+                claimed.worker_id,
+                claimed.worker_heartbeat_at,
+                claimed.worker_lease_id,
+            )
+            renewed = task_queue.heartbeat_task(
+                claimed.id,
+                claimed.worker_id,
+                root,
+            )
+            assert renewed is not None
+
+            result = reconcile_running_task(
+                request,
+                root,
+                worker_liveness=lambda _job: False,
+            )
+            status = task_queue_status(root)
+
+        self.assertEqual(renewed.worker_heartbeat_at, claimed.worker_heartbeat_at)
+        self.assertNotEqual(renewed.worker_lease_id, claimed.worker_lease_id)
+        self.assertEqual(result.outcome, "conflict")
+        self.assertIsNotNone(status.running)
+
+    def test_recovery_events_are_attributed_to_system(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "resume me", root)
+            begin_next_task(root)
+
+            recover_interrupted_task(root)
+            events = load_task_events(root, task_id=queued.id)
+
+        self.assertEqual(events[-1].event, "queued")
+        self.assertEqual(events[-1].event_actor, "system")
+        self.assertEqual(events[-1].trigger, "recovery")
+
+    def test_reverted_task_keeps_completed_regressed_and_reverted_events(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            queued = enqueue_task(42, "ship reversible work", root)
+            running = begin_next_task(root)
+            complete_task(running.id, root, result="Shipped.")
+
+            reverted = revert_task(
+                queued.id,
+                root,
+                result="Reverted after regression.",
+                event_actor="human",
+                trigger="/task revert",
+                related_task_id=7,
+            )
+            events = load_task_events(root, task_id=queued.id)
+
+        self.assertEqual(reverted.status, "reverted")
+        self.assertEqual(
+            [event.event for event in events[-3:]],
+            ["completed", "regressed", "reverted"],
+        )
+        self.assertEqual(events[-1].event_actor, "human")
+        self.assertEqual(events[-1].related_task_id, 7)
+
+    def test_regressed_task_can_be_resolved_by_completed_forward_fix(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = enqueue_task(42, "ship risky work", root)
+            complete_task(begin_next_task(root).id, root, result="Shipped.")
+            regressed = regress_task(original.id, root, result="Broke recovery.")
+            fix = enqueue_task(42, "repair recovery", root, parent_task_id=original.id)
+            complete_task(begin_next_task(root).id, root, result="Recovery fixed.")
+
+            resolved = resolve_regressed_task(
+                original.id,
+                "forward-fixed",
+                root,
+                result="Fixed by follow-up.",
+                related_task_id=fix.id,
+            )
+            events = load_task_events(root, task_id=original.id)
+
+        self.assertEqual(regressed.status, "regressed")
+        self.assertEqual(resolved.status, "forward-fixed")
+        self.assertEqual(
+            [event.event for event in events[-3:]],
+            ["completed", "regressed", "forward-fixed"],
+        )
+        self.assertEqual(events[-1].related_task_id, fix.id)
+
+    def test_forward_fix_must_reference_another_completed_task(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = enqueue_task(42, "ship risky work", root)
+            complete_task(begin_next_task(root).id, root)
+            regress_task(original.id, root, result="Regression.")
+            pending_fix = enqueue_task(42, "repair it", root)
+
+            unresolved = resolve_regressed_task(
+                original.id,
+                "forward-fixed",
+                root,
+                related_task_id=pending_fix.id,
+            )
+            status = task_queue_status(root)
+
+        self.assertIsNone(unresolved)
+        self.assertEqual(status.history[-1].status, "regressed")
+
+    def test_active_worker_lease_prevents_recovery_and_stale_finalization(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            running = begin_direct_task(42, "owned work", root)
+            claimed = claim_running_task(running.id, "worker-one", os.getpid(), root)
+
+            recovered = recover_interrupted_task(root)
+            stale = complete_task(
+                running.id,
+                root,
+                result="stale completion",
+                worker_id="worker-two",
+            )
+            status = task_queue_status(root)
+
+            self.assertIsNotNone(claimed)
+            self.assertIsNone(recovered)
+            self.assertIsNone(stale)
+            self.assertEqual(status.running.worker_id, "worker-one")
+
+            completed = complete_task(
+                running.id,
+                root,
+                result="authoritative completion",
+                worker_id="worker-one",
+            )
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(completed.result, "authoritative completion")
+
+    def test_dead_worker_recovery_preserves_task_worktree_metadata(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            worktree = root / "task-worktree"
+            running = begin_direct_task(42, "recover work", root)
+            claim_running_task(running.id, "dead-worker", 999999, root)
+            record_task_worktree(
+                running.id,
+                "dead-worker",
+                worktree,
+                "ruth/task-1",
+                root,
+            )
+
+            with patch("ruth.tasks.queue.os.kill", side_effect=ProcessLookupError):
+                recovered = recover_interrupted_task(root)
+
+            status = task_queue_status(root)
+
+        self.assertEqual(recovered.status, "pending")
+        self.assertEqual(recovered.worktree_path, str(worktree.resolve()))
+        self.assertEqual(recovered.branch_name, "ruth/task-1")
+        self.assertEqual(recovered.worker_id, "")
+        self.assertIsNone(recovered.worker_pid)
+        self.assertEqual(status.pending[0], recovered)
+
+
+if __name__ == "__main__":
+    unittest.main()

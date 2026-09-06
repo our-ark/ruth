@@ -1,0 +1,42 @@
+name: evolve
+version: 0.9.0
+summary: Turn semantic evidence into bounded, human-governed self-evolution.
+owner: Ruth
+status: active
+mode: co-evolution
+entrypoint: src/ruth/evolution/core.py
+capabilities:
+  state: src/ruth/evolution/core.py
+  evidence: src/ruth/evolution/evidence.py
+  scheduler: src/ruth/evolution/core.py
+  event_journal: src/ruth/evolution/events.py
+  semantic_curation: src/ruth/evolution/curation.py
+  candidate_collection:
+    - src/ruth/evolution/evidence.py
+    - src/ruth/learn.py
+    - src/ruth/evolution/sources/brainstorming.py
+  command_surface: src/ruth/app/core.py
+permissions:
+  filesystem:
+    read:
+      - .ruth/artifacts/logs/conversations
+      - .ruth/artifacts/task_events.jsonl
+      - .ruth/artifacts/evidence.jsonl
+      - .ruth/artifacts/evidence_scans.jsonl
+      - .ruth/artifacts/evolve_events.jsonl
+      - .ruth/evolve_brainstorm_schedule.json
+      - .ruth/evolve_candidates.json
+      - .ruth/evolve_curations.jsonl
+    write:
+      - .ruth/evidence.json
+      - .ruth/evolve_brainstorm_schedule.json
+      - .ruth/evolve.json
+      - .ruth/evolve_candidates.json
+      - .ruth/artifacts/evidence.jsonl
+      - .ruth/artifacts/evidence_scans.jsonl
+      - .ruth/artifacts/evolve_events.jsonl
+      - .ruth/evolve_curations.jsonl
+  git:
+    merge: false
+validation:
+  command: python3 -m unittest discover -s tests -t .

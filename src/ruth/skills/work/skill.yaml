@@ -1,0 +1,26 @@
+name: work
+version: 0.2.0
+summary: Run leased persistent work in isolated task worktrees through queues, backlog, cron, and automatic learning.
+owner: Ruth
+status: active
+mode: background-work
+entrypoint: src/ruth/app/core.py
+capabilities:
+  task_queue: src/ruth/tasks/queue.py
+  task_failure_classification: src/ruth/tasks/failures.py
+  task_worktrees: src/ruth/tasks/worktree.py
+  backlog: src/ruth/backlog.py
+  cron: src/ruth/cron.py
+  automatic_learning: src/ruth/automatic_learning.py
+permissions:
+  filesystem:
+    read: true
+    write:
+      - .ruth/task_queue.json
+      - .ruth/backlog.json
+      - .ruth/cron.json
+      - .ruth/artifacts/learning
+  chat:
+    send_status_updates: true
+validation:
+  command: bin/ruth doctor

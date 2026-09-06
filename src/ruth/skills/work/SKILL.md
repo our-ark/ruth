@@ -1,0 +1,80 @@
+# Work
+
+## Purpose
+
+Use this skill when Ruth should manage persistent work instead of treating every request as a single foreground chat turn.
+
+The work skill covers three core execution modes:
+
+- queue: `/task` FIFO background jobs;
+- backlog: `/backlog` deferred idle-time work with priority;
+- cron: `/cron` recurring scheduled jobs;
+
+It also covers:
+
+- single-message task status updates through the configured chat provider;
+- automatic skill-only learning artifacts after successful work.
+
+## Boundary
+
+Worker state is local runtime state under `.ruth/`:
+
+- `.ruth/task_queue.json`
+- `.ruth/backlog.json`
+- `.ruth/cron.json`
+- `.ruth/artifacts/learning/`
+
+Do not treat every successful job as inheritable. Ruth records an inheritable learning artifact only when completed work changes a skill package under `src/<agent>/skills/<skill-name>/`.
+
+## Operation
+
+When work is queued:
+
+1. Preserve the request and any conversation context snapshot.
+2. Keep task execution non-blocking for the active chat conversation.
+3. Update one chat status message with queued, running, paused, completed,
+   failed, elapsed time, latest update, and review URLs.
+4. Run queued work through the same authorized repository workflow as foreground `/do` work.
+5. Promote backlog items only when the task queue is idle.
+6. Run cron checks in an independent scheduler rather than after chat polling.
+   Claim due occurrences atomically and enqueue them at the front of the task
+   queue. Keep at most one pending, running, or paused task per schedule.
+   Interval targets are fixed-rate: after downtime, coalesce missed targets
+   into one immediate task and advance to the first anchored target still in
+   the future.
+7. When agent runtime authentication, quota, or rate limits are unavailable, move the
+   active task to `paused`, stop the worker before it consumes later tasks, and
+   warn the human. `/task resume <id|all>` moves selected paused tasks back to
+   the front with the same ids and context after access is available again.
+8. Keep the agent-instance branch as the resident control worktree. Give every
+   code task its own linked worktree and branch from the latest available
+   authoritative revision supplied by the VCS provider, and run the agent runtime,
+   tests, commits, publication, and review handoff there. Keep `.ruth` queue,
+   memory, and event state in the resident
+   worktree. Remove successful task worktrees after handoff; preserve failed or
+   paused worktrees for inspection and recovery.
+9. `/task retry <id>` retries only a failed task by creating a new task with a
+   new id and `parent_task_id`; never rewrite the original failure. Preserve the
+   request, context, source, provenance, and any recoverable task
+   workspace/revision. Before new execution, reconcile recorded review
+   identities with the configured review provider; reuse a validated open or
+   landed review instead of duplicating work. If a retry fails, retry that latest failed task so the
+   causal chain remains linear.
+10. Give each running task a worker lease. Recovery must not requeue a task while
+    its owner process is alive, and only the lease owner may publish a terminal
+    task transition or final status message.
+11. Classify failures before deciding whether to retry. Automatically retry only
+    explicit transient failures such as network interruption, rate limiting, or
+    temporary upstream unavailability, with bounded backoff and at most three
+    attempts. Treat dirty worktrees, validation failures, task timeouts,
+    permission or configuration errors, and unknown failures as non-retryable.
+    Record attempt, failure code, failure class, and retry disposition in task
+    events. Keep `/task retry <id>` as the explicit human override.
+12. `/task resume <id|all>` resumes only paused tasks without changing their
+    ids or causal history.
+
+## Inheritance
+
+This is Ruth's explicit work capability. Descendant agents can inherit it when they need autonomous background work, scheduled maintenance, or skill-level learning artifacts.
+
+Implicit teaching is part of the work model: Ruth does not expose `/teach`, but successful skill changes can produce inheritable skill artifacts automatically.
