@@ -4,3 +4,5 @@ parent:
   repo: https://github.com/our-ark/enoch
   branch: main
   commit_at_birth: b16f6acf3d7664b21161b1a743e48f76a66b90bd
+descendant:
+  birth_commit: d14ec1ecf9c939bebca1f18d91d8155f883ba0ec
