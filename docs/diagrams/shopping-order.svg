@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="663" viewBox="0 0 760 663" role="img">
+<title>3 · Order and notify</title><desc>An authorized purchase request uses the selected app&#x27;s order API.</desc>
+<rect width="760" height="663" fill="white"/>
+<text x="32" y="43" font-family="Arial, DejaVu Sans, sans-serif" font-size="27" font-weight="700" text-anchor="start" fill="#172b42">3 · Order and notify</text>
+<text x="32" y="74" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="start" fill="#536478">An authorized purchase request uses the selected app&#x27;s order API.</text>
+<polyline points="90,139 90,610" fill="none" stroke="#8799ac" stroke-width="1" stroke-dasharray="5 5"/>
+<rect x="12" y="99" width="156" height="42" rx="8" fill="#f3f6fb" stroke="#2563b5"/>
+<text x="90" y="126" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#2563b5">Telegram</text>
+<polyline points="365,139 365,610" fill="none" stroke="#8799ac" stroke-width="1" stroke-dasharray="5 5"/>
+<rect x="287" y="99" width="156" height="42" rx="8" fill="#f3f6fb" stroke="#2563b5"/>
+<text x="365" y="126" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#2563b5">Ruth</text>
+<polyline points="660,139 660,610" fill="none" stroke="#8799ac" stroke-width="1" stroke-dasharray="5 5"/>
+<rect x="582" y="99" width="156" height="42" rx="8" fill="#f3f6fb" stroke="#2563b5"/>
+<text x="660" y="126" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#2563b5">Selected app</text>
+<text x="512.5" y="170" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Order request + selection</text>
+<polyline points="660,181 365,181" fill="none" stroke="#2563b5" stroke-width="2" stroke-dasharray="5 5"/>
+<polygon points="365,181 374.0044710235268,176.6503446588877 374.0044710235268,185.3496553411123" fill="#2563b5"/>
+<text x="512.5" y="226" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">getProduct</text>
+<polyline points="365,237 660,237" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="660,237 650.9955289764732,241.3496553411123 650.9955289764732,232.6503446588877" fill="#2563b5"/>
+<text x="512.5" y="282" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Current price + availability</text>
+<polyline points="660,293 365,293" fill="none" stroke="#2563b5" stroke-width="2" stroke-dasharray="5 5"/>
+<polygon points="365,293 374.0044710235268,288.6503446588877 374.0044710235268,297.3496553411123" fill="#2563b5"/>
+<text x="512.5" y="338" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">orderProduct (simulated)</text>
+<polyline points="365,349 660,349" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="660,349 650.9955289764732,353.3496553411123 650.9955289764732,344.6503446588877" fill="#2563b5"/>
+<text x="512.5" y="394" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Order ID + status</text>
+<polyline points="660,405 365,405" fill="none" stroke="#2563b5" stroke-width="2" stroke-dasharray="5 5"/>
+<polygon points="365,405 374.0044710235268,400.6503446588877 374.0044710235268,409.3496553411123" fill="#2563b5"/>
+<text x="512.5" y="450" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">POST order result</text>
+<polyline points="365,461 660,461" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="660,461 650.9955289764732,465.3496553411123 650.9955289764732,456.6503446588877" fill="#2563b5"/>
+<text x="227.5" y="506" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Order notification</text>
+<polyline points="365,517 90,517" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="90,517 99.00447102352678,512.6503446588877 99.00447102352678,521.3496553411123" fill="#2563b5"/>
+<rect x="265.0" y="550" width="200" height="39" rx="6" fill="#eef4fd" stroke="#c6d7f1"/>
+<text x="365" y="574" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Stop app polling</text>
+<text x="380" y="643" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="middle" fill="#536478">Conversation and memory persist after the task.</text>
+</svg>

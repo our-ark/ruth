@@ -13,53 +13,13 @@ focus, or a global current application.
 Arrows below describe operations and data flow. Ruth initiates all calls to
 application APIs; applications do not call a public Ruth endpoint.
 
-```mermaid
-flowchart TB
-    U[User]
-    T[Telegram]
-    U <--> T
+![Ruth architecture: Telegram connects to one Ruth conversation; Ruth calls two apps with shared collaboration and shopping interfaces.](diagrams/shopping-architecture.png)
 
-    subgraph R[One Ruth instance]
-        S["/shop command<br/>Shopping task"]
-        G["Static app registry<br/>App A + App B"]
-        C["One continuing conversation<br/>Memory + reasoning"]
-        P["Message polling + reply routing<br/>Reply to the source session"]
-        X["Shopping tools<br/>queryProduct · getProduct · orderProduct"]
-        S --> C
-        S --> G
-        G --> P
-        G --> X
-        P <--> C
-        C <--> X
-    end
+[Full-size PNG](diagrams/shopping-architecture.png) ·
+[Scalable SVG](diagrams/shopping-architecture.svg)
 
-    T -->|/shop| S
-    T -->|Conversation messages| C
-    C -->|Recommendations and order result| T
-
-    subgraph A[App A]
-        AU["Storefront + chat UI A"]
-        AC["Collaboration APIs<br/>GET events · POST outputs"]
-        AX["Product + order APIs"]
-        AU <--> AC
-        AU <--> AX
-    end
-
-    subgraph B[App B]
-        BU["Storefront + chat UI B"]
-        BC["Collaboration APIs<br/>GET events · POST outputs"]
-        BX["Product + order APIs"]
-        BU <--> BC
-        BU <--> BX
-    end
-
-    U <--> AU
-    U <--> BU
-    P -->|Poll messages + context; post replies + selected context| AC
-    P -->|Poll messages + context; post replies + selected context| BC
-    X -->|Search, inspect, order| AX
-    X -->|Search, inspect, order| BX
-```
+The overview separates Ruth's responsibilities from each app's interfaces.
+The API table below gives the routes and payloads.
 
 ## Demo components
 
@@ -135,48 +95,46 @@ The complete private conversation is not copied into each application's store.
 
 ## End-to-end flow
 
-```mermaid
-sequenceDiagram
-    actor U as User
-    participant T as Telegram
-    participant R as Ruth
-    participant A as App A
-    participant B as App B
+The sequence is split into three images so each step can be read without a
+wide or nested diagram viewport.
 
-    U->>T: /shop running shoes under $80
-    T-->>R: User message via Telegram adapter
-    Note over R: Start task; load two app connections; start polling
-    R->>A: queryProduct / getProduct
-    A-->>R: Candidates + links
-    R->>B: queryProduct / getProduct
-    B-->>R: Candidates + links
-    R->>T: Recommendations with links to both apps
-    T-->>U: Shoes to consider
+### 1. Start shopping
 
-    U->>A: Open product; ask "Is this suitable?"
-    Note over A: Queue message + current product context
-    R->>A: GET events after cursor
-    A-->>R: Message + source session + context snapshot
-    Note over R: Append turn; reason with continuing conversation
-    R->>A: POST outputs to source session
-    A-->>U: Show Ruth's answer in chat UI A
+The user sends `/shop running shoes under $80` in Telegram. Ruth loads both
+registered app connections, starts polling, queries their catalogs, and sends
+recommendations with product links.
 
-    U->>B: Open another product; ask "Better than the first?"
-    R->>B: GET events after cursor
-    B-->>R: Message + source session + context snapshot
-    Note over R: Recall App A comparison in the same conversation
-    R->>B: POST outputs to source session
-    B-->>U: Show Ruth's comparison in chat UI B
+![Shopping kickoff: Telegram request, registry setup, two-app product queries, and recommendations.](diagrams/shopping-kickoff.png)
 
-    U->>B: Order this pair in the selected size
-    R->>B: GET events after cursor
-    B-->>R: Order request + selected product context
-    R->>B: getProduct; then authorized orderProduct
-    B-->>R: Simulated order result
-    R->>B: POST order result to source session
-    R->>T: Order notification
-    Note over R: Finish task after delivery; stop app polling
-```
+[Full-size PNG](diagrams/shopping-kickoff.png) ·
+[Scalable SVG](diagrams/shopping-kickoff.svg)
+
+### 2. Continue in App A or App B
+
+The user opens App A and asks, "Is this suitable?" Later, in App B, they ask,
+"Better than the first?" Both apps use the flow below. Ruth combines the new
+message's page context with the continuing conversation, including the earlier
+App A comparison. Each reply returns to the message's source session.
+
+![App conversation: the UI queues a message and context; Ruth polls the app, reasons with shared memory, and posts its reply back.](diagrams/shopping-conversation.png)
+
+[Full-size PNG](diagrams/shopping-conversation.png) ·
+[Scalable SVG](diagrams/shopping-conversation.svg)
+
+### 3. Order and notify
+
+The user asks the selected app's chat to order a specific pair and size. Ruth
+receives that request through the polling flow above, retrieves current product
+details, and places the authorized simulated order. Results go to the source
+app session and Telegram before polling stops.
+
+![Order completion: retrieve product details, place a simulated order, deliver results to the app and Telegram, and stop polling.](diagrams/shopping-order.png)
+
+[Full-size PNG](diagrams/shopping-order.png) ·
+[Scalable SVG](diagrams/shopping-order.svg)
+
+All diagrams have checked-in PNG previews and standalone SVG versions. Their
+editable drawing source is [render_shopping_demo.py](diagrams/render_shopping_demo.py).
 
 ## Routing and lifecycle rules
 

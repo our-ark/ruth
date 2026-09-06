@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="920" viewBox="0 0 760 920" role="img">
+<title>Ruth shopping demo</title><desc>One agent. One conversation. Two apps.</desc>
+<rect width="760" height="920" fill="white"/>
+<text x="32" y="43" font-family="Arial, DejaVu Sans, sans-serif" font-size="27" font-weight="700" text-anchor="start" fill="#172b42">Ruth shopping demo</text>
+<text x="32" y="74" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="start" fill="#536478">One agent. One conversation. Two apps.</text>
+<rect x="160" y="102" width="440" height="96" rx="12" fill="#f0f6fd" stroke="#9dbde7"/>
+<text x="380" y="130" font-family="Arial, DejaVu Sans, sans-serif" font-size="23" font-weight="700" text-anchor="middle" fill="#2563b5">Telegram</text>
+<text x="380" y="156" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#172b42">/shop + follow-up messages</text>
+<text x="380" y="181" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="middle" fill="#172b42">Recommendations + order notifications</text>
+<polyline points="368,198 368,250" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="368,250 363.6503446588877,240.99552897647322 372.3496553411123,240.99552897647322" fill="#2563b5"/>
+<polyline points="392,250 392,198" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="392,198 396.3496553411123,207.00447102352678 387.6503446588877,207.00447102352678" fill="#2563b5"/>
+<rect x="40" y="252" width="680" height="286" rx="16" fill="#f6f9ff" stroke="#2563b5"/>
+<text x="380" y="290" font-family="Arial, DejaVu Sans, sans-serif" font-size="27" font-weight="700" text-anchor="middle" fill="#2563b5">Ruth</text>
+<text x="380" y="320" font-family="Arial, DejaVu Sans, sans-serif" font-size="21" font-weight="400" text-anchor="middle" fill="#172b42">One continuing conversation + memory</text>
+<rect x="60" y="340" width="300" height="74" rx="12" fill="white" stroke="#cedaf0"/>
+<text x="210" y="369" font-family="Arial, DejaVu Sans, sans-serif" font-size="20" font-weight="700" text-anchor="middle" fill="#172b42">/shop command</text>
+<text x="210" y="396" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="middle" fill="#172b42">Start the shopping task</text>
+<rect x="400" y="340" width="300" height="74" rx="12" fill="white" stroke="#cedaf0"/>
+<text x="550" y="369" font-family="Arial, DejaVu Sans, sans-serif" font-size="20" font-weight="700" text-anchor="middle" fill="#172b42">Static app registry</text>
+<text x="550" y="396" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="middle" fill="#172b42">App A + App B connections</text>
+<rect x="60" y="430" width="640" height="86" rx="12" fill="white" stroke="#cedaf0"/>
+<text x="380" y="462" font-family="Arial, DejaVu Sans, sans-serif" font-size="20" font-weight="700" text-anchor="middle" fill="#172b42">Message polling · Reply routing · Shopping tools</text>
+<text x="380" y="491" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#172b42">Reply to the message&#x27;s source app session</text>
+<polyline points="380,538 380,593" fill="none" stroke="#8799ac" stroke-width="2"/>
+<text x="400" y="570" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="start" fill="#536478">Ruth initiates all API calls</text>
+<polyline points="204,593 556,593" fill="none" stroke="#8799ac" stroke-width="2"/>
+<polyline points="204,593 204,625" fill="none" stroke="#287554" stroke-width="2"/>
+<polygon points="204,625 199.6503446588877,615.9955289764732 208.3496553411123,615.9955289764732" fill="#287554"/>
+<rect x="40" y="626" width="328" height="235" rx="12" fill="#fafcfe" stroke="#287554"/>
+<text x="204" y="657" font-family="Arial, DejaVu Sans, sans-serif" font-size="23" font-weight="700" text-anchor="middle" fill="#287554">App A</text>
+<text x="204" y="684" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#172b42">Storefront + chat UI A</text>
+<polyline points="60,703 348,703" fill="none" stroke="#dce3ea" stroke-width="1"/>
+<text x="204" y="730" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="700" text-anchor="middle" fill="#172b42">Two collaboration endpoints</text>
+<text x="204" y="757" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#172b42">GET events · POST outputs</text>
+<text x="204" y="792" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="700" text-anchor="middle" fill="#172b42">Three shopping operations</text>
+<text x="204" y="819" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#172b42">queryProduct · getProduct</text>
+<text x="204" y="844" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#172b42">orderProduct</text>
+<polyline points="556,593 556,625" fill="none" stroke="#7151a3" stroke-width="2"/>
+<polygon points="556,625 551.6503446588877,615.9955289764732 560.3496553411123,615.9955289764732" fill="#7151a3"/>
+<rect x="392" y="626" width="328" height="235" rx="12" fill="#fafcfe" stroke="#7151a3"/>
+<text x="556" y="657" font-family="Arial, DejaVu Sans, sans-serif" font-size="23" font-weight="700" text-anchor="middle" fill="#7151a3">App B</text>
+<text x="556" y="684" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#172b42">Storefront + chat UI B</text>
+<polyline points="412,703 700,703" fill="none" stroke="#dce3ea" stroke-width="1"/>
+<text x="556" y="730" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="700" text-anchor="middle" fill="#172b42">Two collaboration endpoints</text>
+<text x="556" y="757" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#172b42">GET events · POST outputs</text>
+<text x="556" y="792" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="700" text-anchor="middle" fill="#172b42">Three shopping operations</text>
+<text x="556" y="819" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#172b42">queryProduct · getProduct</text>
+<text x="556" y="844" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#172b42">orderProduct</text>
+<text x="380" y="895" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="400" text-anchor="middle" fill="#536478">Message-time context · No dynamic app tracking</text>
+</svg>

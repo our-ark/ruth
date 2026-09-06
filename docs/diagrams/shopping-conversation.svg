@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="626" viewBox="0 0 760 626" role="img">
+<title>2 · Continue in either app</title><desc>The same message and context exchange works in App A and App B.</desc>
+<rect width="760" height="626" fill="white"/>
+<text x="32" y="43" font-family="Arial, DejaVu Sans, sans-serif" font-size="27" font-weight="700" text-anchor="start" fill="#172b42">2 · Continue in either app</text>
+<text x="32" y="74" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="start" fill="#536478">The same message and context exchange works in App A and App B.</text>
+<polyline points="90,139 90,580" fill="none" stroke="#8799ac" stroke-width="1" stroke-dasharray="5 5"/>
+<rect x="12" y="99" width="156" height="42" rx="8" fill="#f3f6fb" stroke="#2563b5"/>
+<text x="90" y="126" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#2563b5">App chat UI</text>
+<polyline points="365,139 365,580" fill="none" stroke="#8799ac" stroke-width="1" stroke-dasharray="5 5"/>
+<rect x="287" y="99" width="156" height="42" rx="8" fill="#f3f6fb" stroke="#2563b5"/>
+<text x="365" y="126" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#2563b5">App backend</text>
+<polyline points="660,139 660,580" fill="none" stroke="#8799ac" stroke-width="1" stroke-dasharray="5 5"/>
+<rect x="582" y="99" width="156" height="42" rx="8" fill="#f3f6fb" stroke="#2563b5"/>
+<text x="660" y="126" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#2563b5">Ruth</text>
+<text x="227.5" y="170" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Message + page context</text>
+<polyline points="90,181 365,181" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="365,181 355.9955289764732,185.3496553411123 355.9955289764732,176.6503446588877" fill="#2563b5"/>
+<rect x="278.0" y="207" width="174" height="39" rx="6" fill="#eef4fd" stroke="#c6d7f1"/>
+<text x="365" y="231" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Queue event</text>
+<text x="512.5" y="284" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">GET events</text>
+<polyline points="660,295 365,295" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="365,295 374.0044710235268,290.6503446588877 374.0044710235268,299.3496553411123" fill="#2563b5"/>
+<text x="512.5" y="343" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Message + context snapshot</text>
+<polyline points="365,354 660,354" fill="none" stroke="#2563b5" stroke-width="2" stroke-dasharray="5 5"/>
+<polygon points="660,354 650.9955289764732,358.3496553411123 650.9955289764732,349.6503446588877" fill="#2563b5"/>
+<rect x="567.0" y="387" width="166" height="60" rx="6" fill="#eef4fd" stroke="#c6d7f1"/>
+<text x="650" y="411" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Use the same</text>
+<text x="650" y="432" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">conversation</text>
+<text x="512.5" y="488" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">POST reply + selected context</text>
+<polyline points="660,499 365,499" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="365,499 374.0044710235268,494.6503446588877 374.0044710235268,503.3496553411123" fill="#2563b5"/>
+<text x="227.5" y="547" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Show Ruth&#x27;s reply</text>
+<polyline points="365,558 90,558" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="90,558 99.00447102352678,553.6503446588877 99.00447102352678,562.3496553411123" fill="#2563b5"/>
+<text x="380" y="609" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="middle" fill="#536478">Reply to the source session, even if the user switches tabs.</text>
+</svg>

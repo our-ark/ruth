@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="500" viewBox="0 0 760 500" role="img">
+<title>1 · Start shopping</title><desc>Ask in Telegram; get recommendations from both apps.</desc>
+<rect width="760" height="500" fill="white"/>
+<text x="32" y="43" font-family="Arial, DejaVu Sans, sans-serif" font-size="27" font-weight="700" text-anchor="start" fill="#172b42">1 · Start shopping</text>
+<text x="32" y="74" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="start" fill="#536478">Ask in Telegram; get recommendations from both apps.</text>
+<polyline points="90,139 90,450" fill="none" stroke="#8799ac" stroke-width="1" stroke-dasharray="5 5"/>
+<rect x="12" y="99" width="156" height="42" rx="8" fill="#f3f6fb" stroke="#2563b5"/>
+<text x="90" y="126" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#2563b5">Telegram</text>
+<polyline points="365,139 365,450" fill="none" stroke="#8799ac" stroke-width="1" stroke-dasharray="5 5"/>
+<rect x="287" y="99" width="156" height="42" rx="8" fill="#f3f6fb" stroke="#2563b5"/>
+<text x="365" y="126" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#2563b5">Ruth</text>
+<polyline points="660,139 660,450" fill="none" stroke="#8799ac" stroke-width="1" stroke-dasharray="5 5"/>
+<rect x="582" y="99" width="156" height="42" rx="8" fill="#f3f6fb" stroke="#2563b5"/>
+<text x="660" y="126" font-family="Arial, DejaVu Sans, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#2563b5">Apps A + B</text>
+<text x="227.5" y="165" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">/shop shoes under $80</text>
+<polyline points="90,176 365,176" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="365,176 355.9955289764732,180.3496553411123 355.9955289764732,171.6503446588877" fill="#2563b5"/>
+<rect x="278.0" y="202" width="174" height="60" rx="6" fill="#eef4fd" stroke="#c6d7f1"/>
+<text x="365" y="226" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Load app registry</text>
+<text x="365" y="247" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Start polling</text>
+<text x="512.5" y="296" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">queryProduct / getProduct</text>
+<polyline points="365,307 660,307" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="660,307 650.9955289764732,311.3496553411123 650.9955289764732,302.6503446588877" fill="#2563b5"/>
+<text x="512.5" y="352" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Products + canonical links</text>
+<polyline points="660,363 365,363" fill="none" stroke="#2563b5" stroke-width="2" stroke-dasharray="5 5"/>
+<polygon points="365,363 374.0044710235268,358.6503446588877 374.0044710235268,367.3496553411123" fill="#2563b5"/>
+<text x="227.5" y="419" font-family="Arial, DejaVu Sans, sans-serif" font-size="16" font-weight="400" text-anchor="middle" fill="#172b42">Recommendations + links</text>
+<polyline points="365,430 90,430" fill="none" stroke="#2563b5" stroke-width="2"/>
+<polygon points="90,430 99.00447102352678,425.6503446588877 99.00447102352678,434.3496553411123" fill="#2563b5"/>
+<text x="380" y="482" font-family="Arial, DejaVu Sans, sans-serif" font-size="17" font-weight="400" text-anchor="middle" fill="#536478">Both app accounts are connected before the demo.</text>
+</svg>
