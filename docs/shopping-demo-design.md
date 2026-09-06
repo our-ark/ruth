@@ -13,7 +13,7 @@ focus, or a global current application.
 Arrows below describe operations and data flow. Ruth initiates all calls to
 application APIs; applications do not call a public Ruth endpoint.
 
-![Ruth architecture: Telegram connects to one Ruth conversation; Ruth calls two apps with shared collaboration and shopping interfaces.](diagrams/shopping-architecture.png)
+<a href="diagrams/shopping-architecture.png"><img src="diagrams/shopping-architecture.png" alt="Ruth architecture: Telegram connects to one Ruth conversation; Ruth calls two apps with shared collaboration and shopping interfaces." width="600"></a>
 
 [Full-size PNG](diagrams/shopping-architecture.png) ·
 [Scalable SVG](diagrams/shopping-architecture.svg)
@@ -104,7 +104,7 @@ The user sends `/shop running shoes under $80` in Telegram. Ruth loads both
 registered app connections, starts polling, queries their catalogs, and sends
 recommendations with product links.
 
-![Shopping kickoff: Telegram request, registry setup, two-app product queries, and recommendations.](diagrams/shopping-kickoff.png)
+<a href="diagrams/shopping-kickoff.png"><img src="diagrams/shopping-kickoff.png" alt="Shopping kickoff: Telegram request, registry setup, two-app product queries, and recommendations." width="600"></a>
 
 [Full-size PNG](diagrams/shopping-kickoff.png) ·
 [Scalable SVG](diagrams/shopping-kickoff.svg)
@@ -116,7 +116,7 @@ The user opens App A and asks, "Is this suitable?" Later, in App B, they ask,
 message's page context with the continuing conversation, including the earlier
 App A comparison. Each reply returns to the message's source session.
 
-![App conversation: the UI queues a message and context; Ruth polls the app, reasons with shared memory, and posts its reply back.](diagrams/shopping-conversation.png)
+<a href="diagrams/shopping-conversation.png"><img src="diagrams/shopping-conversation.png" alt="App conversation: the UI queues a message and context; Ruth polls the app, reasons with shared memory, and posts its reply back." width="600"></a>
 
 [Full-size PNG](diagrams/shopping-conversation.png) ·
 [Scalable SVG](diagrams/shopping-conversation.svg)
@@ -128,7 +128,7 @@ receives that request through the polling flow above, retrieves current product
 details, and places the authorized simulated order. Results go to the source
 app session and Telegram before polling stops.
 
-![Order completion: retrieve product details, place a simulated order, deliver results to the app and Telegram, and stop polling.](diagrams/shopping-order.png)
+<a href="diagrams/shopping-order.png"><img src="diagrams/shopping-order.png" alt="Order completion: retrieve product details, place a simulated order, deliver results to the app and Telegram, and stop polling." width="600"></a>
 
 [Full-size PNG](diagrams/shopping-order.png) ·
 [Scalable SVG](diagrams/shopping-order.svg)
