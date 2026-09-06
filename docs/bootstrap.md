@@ -23,6 +23,8 @@ test's behavior check. It does not change runtime profile behavior.
 
 The fix and a regression test covering descent in both alphabetical directions
 are preserved in [`bootstrap/genesis-profile-order.patch`](bootstrap/genesis-profile-order.patch).
+The patch uses zero context; apply it to the Genesis base with
+`git apply --unidiff-zero genesis-profile-order.patch`.
 They were developed in an isolated Genesis worktree; neither Genesis's main
 branch nor Enoch's body was modified for Ruth's creation.
 

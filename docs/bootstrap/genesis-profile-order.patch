@@ -2,10 +2,7 @@ diff --git a/src/genesis/creator.py b/src/genesis/creator.py
 index a10e5e2..5e23540 100644
 --- a/src/genesis/creator.py
 +++ b/src/genesis/creator.py
-@@ -709,6 +709,13 @@ def _transform_file_text(
-         "the first Genesis-born agent",
-         "a Genesis-born agent",
-     )
+@@ -711,0 +712,7 @@ def _transform_file_text(
 +    if source.name == f"test_{source_agent.package}_profiles.py":
 +        # Renaming the built-in profile can change its alphabetical position.
 +        transformed = re.sub(
@@ -13,17 +10,11 @@ index a10e5e2..5e23540 100644
 +            lambda match: match[1] + ", ".join(sorted(match[2].split(", "))) + match[3],
 +            transformed,
 +        )
-     if source.name == f"test_{source_agent.package}_identity.py":
-         transformed = re.sub(r"role: [a-z_]+_agent", "role: descendant_agent", transformed)
-         transformed = transformed.replace(
 diff --git a/tests/test_genesis_creator.py b/tests/test_genesis_creator.py
 index 439a7e6..ee14e22 100644
 --- a/tests/test_genesis_creator.py
 +++ b/tests/test_genesis_creator.py
-@@ -29,6 +29,36 @@ _PUBLIC_FIXTURE_TEMP: tempfile.TemporaryDirectory[str] | None = None
- 
- 
- class GenesisCreatorTests(unittest.TestCase):
+@@ -31,0 +32,30 @@ class GenesisCreatorTests(unittest.TestCase):
 +    def test_profile_order_survives_descent_in_both_alphabetical_directions(self) -> None:
 +        with tempfile.TemporaryDirectory() as directory:
 +            workspace = Path(directory)
@@ -54,6 +45,3 @@ index 439a7e6..ee14e22 100644
 +                    self.assertTrue((repo / "tests" / f"test_{name}_profiles.py").is_file())
 +                    source, ancestor = repo, name
 +
-     def test_creates_body_yaml_descendant_from_modern_source(self) -> None:
-         with tempfile.TemporaryDirectory() as directory:
-             workspace = Path(directory)

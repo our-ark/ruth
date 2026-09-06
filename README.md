@@ -48,6 +48,7 @@ python3.13 -m venv .ruth/venv
 export RUTH_PYTHON="$PWD/.ruth/venv/bin/python"
 bin/ruth config provider chat telegram
 bin/ruth setup
+bin/ruth setup chat <your-chat-id>
 ```
 
 Use Ruth's own Telegram bot and authorized chat. After configuring them,
