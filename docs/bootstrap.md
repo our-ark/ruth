@@ -53,6 +53,10 @@ and Doctor-selected test environment supplies them.
   Python 3.13 and `python -m unittest discover -s tests -t .`.
 - The inherited suite contains 844 tests; the creation environment skips seven
   optional tests. No skip was added to work around the profile failure.
+- Instance Doctor passed after the installed-provider correction: inherited
+  tests, import checks, build backend, authenticated Codex runtime and GitHub
+  forge, clean worktree, and private-state storage checks all passed. Runtime
+  and test environments also passed `pip check`.
 
 The application collaboration protocol remains planned work. These checks
 validate the inherited agent foundation, not cross-application interoperability.
