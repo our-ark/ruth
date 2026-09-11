@@ -36,3 +36,12 @@ without conversation deletion. The command-dispatch check enters through
 The inherited Telegram, runtime, application, command registry, daemon,
 authorization and effect tests provide regression coverage. Live Telegram
 delivery and remote/phone access still require configured deployment testing.
+
+## Telegram recommendation photos
+
+The photo update passes 16 shopping/transport tests and 255 existing application,
+Telegram, notification and effect-fencing tests. These include multipart image
+upload, catalog-derived captions, source-app image restrictions, failed-image
+fallback, and photo deduplication after event replay/restart. The command-dispatch
+test verifies that text precedes photos and that app replies stay in the app.
+The automated Telegram transport is mocked; it does not establish live delivery.

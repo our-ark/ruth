@@ -950,6 +950,7 @@ class RuthApplication:
             )
             self._flush_session_syncs()
             mark_reply_sent(self.channel_name, receipt.key, self.root)
+        self._deliver_shopping_photos(event.conversation_id, receipt.key)
         self._remember_update_offset(event.cursor)
         acknowledge_event(self.channel_name, receipt.key, self.root)
         if self._restart_after_reply:
@@ -1718,6 +1719,28 @@ class RuthApplication:
             return shopping.command(chat_id, self._session_key(chat_id), argument, _CURRENT_EVENT_KEY.get())
         except ShoppingError as error:
             return str(error)
+
+    def _deliver_shopping_photos(self, chat_id, event_id):
+        from ruth.shopping.client import ShoppingError
+        from ruth.shopping.photos import send_product_photo
+
+        # The inherited text-only provider remains usable for console/other channels.
+        token = getattr(getattr(self.client, "config", None), "token", "")
+        if self.channel_name != "telegram" or not token or _allowed_conversation_id(self.client) != chat_id:
+            return
+        try:
+            shopping = self._shopping_service()
+            if shopping is None:
+                return
+            def send(chat, content, mime, caption):
+                # ShoppingService already holds the epoch fence around this callback.
+                self.authorization.require("shopping.send-photo", ("chat.send",))
+                return send_product_photo(token, chat, content, mime, caption)
+            errors = shopping.deliver_photos(chat_id, event_id, send)
+            if errors:
+                print("Ruth shopping photos: " + "; ".join(errors))
+        except (ShoppingError, OSError, CapabilityAuthorizationError) as error:
+            print(f"Ruth shopping photos unavailable ({type(error).__name__}); text recommendation retained")
 
     def _start_shopping_worker(self):
         if self._shopping_worker is not None:

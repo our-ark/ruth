@@ -75,6 +75,21 @@ runtime session**, including previous Telegram conversation. Order notifications
 use Ruth's existing durable notification service. The app worker polls while
 Telegram's long poll is waiting; a shared lock serializes reasoning turns.
 
+Telegram recommendations include separate product photos after the text answer.
+Each photo caption contains the store, product name, price, total including mock
+tax, a short catalog description, and the same connected product link. Ruth reads
+the catalog's `image` from the registered app and uploads its bytes using
+[Telegram sendPhoto](https://core.telegram.org/bots/api#sendphoto), so local demo
+images do not need a public image host. PNG/JPEG images are limited to 8 MB;
+cross-origin images and redirects are not followed, and image requests carry no
+account credentials. The shared provider's text-only interface remains unchanged.
+
+Photo delivery is supplementary: the text and links are delivered first. Per-turn,
+per-product receipts prevent duplicate photo attempts on event replay or restart.
+An unavailable image or ambiguous upload falls back to the text recommendation;
+it does not rerun reasoning, block the conversation, or retry a possibly delivered
+photo. Ask Ruth to show the photos again to make a new attempt.
+
 If serving the websites from the source checkout for another instance, pass
 `--root /absolute/path/to/the/instance` to `serve`. The instance's own code must
 also include this revision. Do not run the console against a live Telegram

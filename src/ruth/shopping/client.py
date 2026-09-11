@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ruth.paths import private_state_path
@@ -58,6 +58,28 @@ class AppConnection:
 
     def product(self, product_id):
         return self.request("/products/" + quote(product_id, safe=""))
+
+    def image(self, path):
+        """Read a public catalog image from this app, without account credentials."""
+        if not isinstance(path, str) or not path or any(ord(c) < 32 for c in path):
+            raise ShoppingError("Missing or invalid product image")
+        url = urlsplit(urljoin(self.base_url + "/", path))
+        origin = urlsplit(self.base_url)
+        if ((url.scheme, url.netloc) != (origin.scheme, origin.netloc)
+                or url.username or url.password or url.fragment):
+            raise ShoppingError("Product images must belong to the registered app")
+        limit = 8_000_000
+        try:
+            with build_opener(NoRedirect()).open(Request(url.geturl()), timeout=5) as response:
+                content = response.read(limit + 1)
+                mime = response.headers.get_content_type()
+        except (URLError, TimeoutError, OSError, ValueError):
+            raise ShoppingError(f"{self.name}'s product image is unavailable") from None
+        valid = ((mime == "image/png" and content.startswith(b"\x89PNG\r\n\x1a\n"))
+                 or (mime == "image/jpeg" and content.startswith(b"\xff\xd8\xff")))
+        if not valid or len(content) > limit:
+            raise ShoppingError("Product image must be a PNG or JPEG under 8 MB")
+        return content, mime
 
     def link(self, product_id):
         return self.base_url + "/?" + urlencode({"product": product_id}) + "#" + urlencode({"connect": self.connect_token})

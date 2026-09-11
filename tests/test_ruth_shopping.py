@@ -219,6 +219,67 @@ class ShoppingIntegrationTests(unittest.TestCase):
         with self.assertRaises(ShoppingError):
             app.request("/orders", dict(body, size="10"))
 
+    def test_recommendation_photos_use_catalog_facts_and_survive_replay(self):
+        reply = self.kickoff()
+        photos = []
+        def sent(chat, content, mime, caption):
+            photos.append((chat, content, mime, caption))
+            return len(photos)
+        self.assertEqual(self.service.deliver_photos(99, "telegram-1", sent), [])
+        self.assertEqual(photos, [], "only the registry's owner can receive photos")
+        self.assertEqual(self.service.deliver_photos(42, "telegram-1", sent), [])
+        self.assertEqual(len(photos), 2)
+        self.assertEqual(photos[0][0], 42)
+        self.assertEqual(photos[0][1], (ROOT / "examples/shopping/dayform/shoe.png").read_bytes())
+        self.assertEqual(photos[0][2], "image/png")
+        self.assertIn("$107.80 total", photos[0][3])
+        self.assertIn("$123.20 total", photos[1][3])
+        self.assertIn("#connect=browser-dayform", photos[0][3])
+        self.assertEqual(self.kickoff(), reply)
+        self.assertEqual(self.new_service().deliver_photos(42, "telegram-1", sent), [])
+        self.assertEqual(len(photos), 2)
+        self.assertEqual(len(self.brain.calls), 1)
+
+    def test_failed_or_ambiguous_photo_upload_retains_text_and_does_not_replay(self):
+        reply = self.kickoff()
+        attempts = []
+        def uncertain(*args):
+            attempts.append(args)
+            raise ShoppingError("Telegram photo delivery could not be confirmed")
+        self.assertEqual(len(self.service.deliver_photos(42, "telegram-1", uncertain)), 2)
+        self.assertEqual(self.new_service().deliver_photos(42, "telegram-1", uncertain), [])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.kickoff(), reply)
+        self.assertIn("#connect=browser-dayform", reply)
+        self.assertTrue(self.service.active_for(42))
+
+    def test_duplicate_recommendations_produce_one_photo_and_missing_image_falls_back(self):
+        self.service.respond = lambda *_: json.dumps({"reply": "This pair.", "recommendations": [
+            {"app_id": "dayform", "product_id": "day-one"},
+            {"app_id": "dayform", "product_id": "day-one"}]})
+        self.kickoff()
+        state = self.service.load()
+        receipt = next(iter(state["receipts"].values()))
+        self.assertEqual(len(receipt["output"]["recommendations"]), 1)
+        receipt["output"]["recommendations"][0]["image"] = "/missing.png"
+        self.service.save(state)
+        photos = []
+        self.assertEqual(len(self.service.deliver_photos(42, "telegram-1", lambda *a: photos.append(a))), 1)
+        self.assertEqual(photos, [])
+        self.assertIn("This pair.", self.kickoff())
+
+    def test_photo_reader_rejects_other_origins_and_non_images(self):
+        from unittest.mock import patch
+        app = self.apps["dayform"]
+        with patch("ruth.shopping.client.build_opener") as opener:
+            for path in ("https://unrelated.example/shoe.png", "//unrelated.example/shoe.png",
+                         "file:///etc/passwd", "http://user:pass@127.0.0.1/shoe.png"):
+                with self.assertRaises(ShoppingError):
+                    app.image(path)
+            opener.assert_not_called()
+        with self.assertRaises(ShoppingError):
+            app.image("/")
+
     def test_ruth_command_dispatch_uses_telegram_session_for_app_turns(self):
         from unittest.mock import patch
         from ruth.app.core import RuthApplication
@@ -232,6 +293,8 @@ class ShoppingIntegrationTests(unittest.TestCase):
         brain = self.brain
         class Chat(_Chat):
             name = "telegram"
+            from types import SimpleNamespace
+            config = SimpleNamespace(token="test-token")
             @property
             def allowed_conversation_id(self):
                 return 42
@@ -241,11 +304,20 @@ class ShoppingIntegrationTests(unittest.TestCase):
 
         atomic_write(registry_path(self.root), json.dumps({"apps": [app.__dict__ for app in self.apps.values()]}))
         chat = Chat()
-        with patch("ruth.app.core.ensure_long_term_memory"), patch("ruth.app.core.RuthApplication._maybe_start_lineage_worker"):
+        photos = []
+        def send_photo(token, chat_id, content, mime, caption):
+            self.assertTrue(chat.sent, "text must be delivered before product photos")
+            photos.append((chat_id, content, mime, caption))
+            return len(photos)
+        with patch("ruth.app.core.ensure_long_term_memory"), patch("ruth.app.core.RuthApplication._maybe_start_lineage_worker"), \
+                patch("ruth.shopping.photos.send_product_photo", side_effect=send_photo):
             bot = RuthApplication(load_identity(), self.root, chat, runtime=Runtime(),
                                   repository=BranchlessRepositoryFixture(), review=IndependentReviewFixture())
             bot.handle_event(ChatEvent(cursor="1", conversation_id=42, message_id="1", text="/shop work sneakers under $120, US 9"))
             self.assertIn("Two options", chat.sent[-1][1])
+            self.assertEqual(len(photos), 2)
+            bot.handle_event(ChatEvent(cursor="1", conversation_id=42, message_id="1", text="/shop work sneakers under $120, US 9"))
+            self.assertEqual(len(photos), 2, "duplicate events must not resend photos")
             self.message("dayform", "day-one")
             with bot._conversation_lock:
                 self.assertEqual(bot._shopping_service().poll_once(42), [])
@@ -253,6 +325,7 @@ class ShoppingIntegrationTests(unittest.TestCase):
             self.assertEqual({key for key, _ in brain.calls}, {"telegram:42"})
             self.assertEqual(len(brain.calls), 3)
             self.assertEqual(len(chat.sent), 2, "app replies belong in the app, not Telegram")
+            self.assertEqual(len(photos), 4, "both Telegram recommendation turns have catalog photos")
             self.assertEqual(len(self.transcript("dayform")["outputs"]), 1)
 
     def test_unavailable_runtime_has_bounded_attempts_and_no_purchase(self):
