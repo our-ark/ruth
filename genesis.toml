@@ -19,7 +19,7 @@ validation = ["-m", "unittest", "discover", "-s", "tests", "-t", "."]
 
 [[runtime_dependencies]]
 name = "uaap-agent-sdk"
-requirement = "our-ark-agent-sdk @ git+https://github.com/our-ark/ruth.git@be545142df14a08851efc46dec024cc19af1ed85#subdirectory=libraries/agent-sdk"
+requirement = "our-ark-agent-sdk @ git+https://github.com/our-ark/ruth.git@265e7d3a8bee47a5f7d4847cafc3cf9dfe6a30d1#subdirectory=libraries/agent-sdk"
 import_name = "our_ark_agent_sdk"
 local_source = "libraries/agent-sdk/src"
 
