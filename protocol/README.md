@@ -51,6 +51,12 @@ context does not imply that every application receives its full conversation
 or private memory. App-provided context remains untrusted input and does not
 grant permission to take actions or disclose unrelated information.
 
+The current agent SDK exposes the two directions as `AppEvent.context` from
+`AppClient.events()` and `AgentOutput.shared_context` sent by `AppClient.output()`.
+See its [context exchange example](../libraries/agent-sdk/README.md#context-exchange).
+These are message-bound snapshots and disclosures. Independent context-only
+events or context read/write endpoints are not implemented in this version.
+
 ## Current HTTP mapping
 
 The [UAAP App SDK](../libraries/app-sdk/README.md) implements both contracts

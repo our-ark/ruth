@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SDK_PATHS = [str(ROOT / 'libraries' / name / 'src') for name in ('agent-sdk', 'app-sdk')]
 sys.path[:0] = SDK_PATHS
 
-from our_ark_agent_sdk import AppClient, UAAPError
+from our_ark_agent_sdk import AgentOutput, AppClient, UAAPError
 from our_ark_app_sdk import APIError, AppServer, MessageStore
 
 
@@ -64,7 +64,7 @@ class UAAPSDKTests(unittest.TestCase):
         batch = self.app.events()
         self.assertEqual(batch['events'][0]['context']['selection']['text'], 'A selected paragraph.')
         self.assertNotIn('product_id', batch['events'][0]['context'])
-        output = {'id': 'reply-1', 'in_reply_to': 'note-message', 'text': 'Here is an explanation.',
+        output: AgentOutput = {'id': 'reply-1', 'in_reply_to': 'note-message', 'text': 'Here is an explanation.',
                   'shared_context': {'language': 'en'}}
         self.assertEqual(self.app.output(self.session, output), output)
         self.assertEqual(self.app.output(self.session, output), output)
@@ -147,13 +147,26 @@ class UAAPSDKTests(unittest.TestCase):
     def test_invalid_batches_cannot_advance_saved_position(self):
         for batch in (
             {'events': [], 'cursor': 8},
-            {'events': [{'cursor': 2}, {'cursor': 2}], 'cursor': 2},
-            {'events': [{'cursor': 2}], 'cursor': 3},
-            {'events': [{'cursor': True}], 'cursor': True},
+            {'events': [{'cursor': 2, 'context': {}}, {'cursor': 2, 'context': {}}], 'cursor': 2},
+            {'events': [{'cursor': 2, 'context': {}}], 'cursor': 3},
+            {'events': [{'cursor': True, 'context': {}}], 'cursor': True},
         ):
             with self.subTest(batch=batch), patch.object(AppClient, 'request', return_value=batch):
                 with self.assertRaises(UAAPError):
                     self.app.events(1)
+
+    def test_context_envelopes_reject_missing_or_invalid_shapes(self):
+        for fields in ({}, {'context': None}, {'context': []}, {'context': 'paragraph'}):
+            batch = {'events': [{'cursor': 1, **fields}], 'cursor': 1}
+            with self.subTest(fields=fields), patch.object(AppClient, 'request', return_value=batch):
+                with self.assertRaisesRegex(UAAPError, 'context snapshot'):
+                    self.app.events()
+        for shared in (None, [], 'en'):
+            with self.subTest(shared=shared), patch.object(AppClient, 'request') as request:
+                with self.assertRaisesRegex(ValueError, 'shared_context'):
+                    self.app.output(self.session, {'id': 'reply', 'in_reply_to': 'message',
+                                                  'text': 'Hello', 'shared_context': shared})
+                request.assert_not_called()
 
     def test_sdk_imports_are_independent_of_ruth_and_frontend(self):
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(SDK_PATHS))
