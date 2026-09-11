@@ -39,15 +39,16 @@ still requires configured deployment testing.
 
 ## Telegram recommendation photos
 
-The photo update passes 16 shopping/transport tests and 255 existing application,
-Telegram, notification and effect-fencing tests. These include multipart image
-upload, catalog-derived captions, source-app image restrictions, failed-image
-fallback, and photo deduplication after event replay/restart. The command-dispatch
-test verifies that text precedes photos and that app replies stay in the app.
+The grouped-photo update passes 18 shopping/transport tests and 255 existing
+application, Telegram, notification and effect-fencing tests. These include one
+multipart album upload, numbered captions with all links intact, Unicode caption
+limits, source-app image restrictions, and replay protection. The command-dispatch
+test verifies that a successful album replaces the separate text recommendation,
+that a failed album falls back to text once, and that app replies stay in the app.
 The automated Telegram transport is mocked; it does not establish live delivery.
 
-After deployment to a configured local Ruth instance, a real Telegram shopping
-turn produced three product photo messages (Day One, Arc 01 and Day One Lite).
-All three uploads returned Telegram message IDs and were recorded as delivered;
-re-invoking delivery for that same turn sent no duplicate photos. This checks
-live photo delivery for the demo catalogs, not remote access to the local stores.
+A live check consolidated the latest saved recommendation (Day One, Arc 01 and
+Day One Lite) through the same album delivery path. A single sendMediaGroup upload
+returned three message IDs sharing one media_group_id, and the album receipt was
+recorded as delivered. This checks Telegram grouping and delivery for the demo
+catalogs, not remote access to the local stores or every Telegram client's layout.

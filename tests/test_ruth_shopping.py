@@ -222,22 +222,23 @@ class ShoppingIntegrationTests(unittest.TestCase):
     def test_recommendation_photos_use_catalog_facts_and_survive_replay(self):
         reply = self.kickoff()
         photos = []
-        def sent(chat, content, mime, caption):
-            photos.append((chat, content, mime, caption))
-            return len(photos)
-        self.assertEqual(self.service.deliver_photos(99, "telegram-1", sent), [])
+        def sent(chat, images, caption):
+            photos.append((chat, images, caption))
+            return {"message_ids": [1, 2], "media_group_id": "album-1"}
+        self.assertFalse(self.service.deliver_photos(99, "telegram-1", sent).delivered)
         self.assertEqual(photos, [], "only the registry's owner can receive photos")
-        self.assertEqual(self.service.deliver_photos(42, "telegram-1", sent), [])
-        self.assertEqual(len(photos), 2)
+        self.assertTrue(self.service.deliver_photos(42, "telegram-1", sent).delivered)
+        self.assertEqual(len(photos), 1, "all recommended products use one upload")
         self.assertEqual(photos[0][0], 42)
-        self.assertEqual(photos[0][1], (ROOT / "examples/shopping/dayform/shoe.png").read_bytes())
-        self.assertEqual(photos[0][2], "image/png")
-        self.assertIn("$107.80 total", photos[0][3])
-        self.assertIn("$123.20 total", photos[1][3])
-        self.assertIn("#connect=browser-dayform", photos[0][3])
+        self.assertEqual(photos[0][1][0][0], (ROOT / "examples/shopping/dayform/shoe.png").read_bytes())
+        self.assertEqual(photos[0][1][0][1], "image/png")
+        self.assertIn("$107.80 total", photos[0][2])
+        self.assertIn("$123.20 total", photos[0][2])
+        self.assertIn("#connect=browser-dayform", photos[0][2])
+        self.assertIn("Two options for your workday", photos[0][2])
         self.assertEqual(self.kickoff(), reply)
-        self.assertEqual(self.new_service().deliver_photos(42, "telegram-1", sent), [])
-        self.assertEqual(len(photos), 2)
+        self.assertTrue(self.new_service().deliver_photos(42, "telegram-1", sent).delivered)
+        self.assertEqual(len(photos), 1)
         self.assertEqual(len(self.brain.calls), 1)
 
     def test_failed_or_ambiguous_photo_upload_retains_text_and_does_not_replay(self):
@@ -246,9 +247,9 @@ class ShoppingIntegrationTests(unittest.TestCase):
         def uncertain(*args):
             attempts.append(args)
             raise ShoppingError("Telegram photo delivery could not be confirmed")
-        self.assertEqual(len(self.service.deliver_photos(42, "telegram-1", uncertain)), 2)
-        self.assertEqual(self.new_service().deliver_photos(42, "telegram-1", uncertain), [])
-        self.assertEqual(len(attempts), 2)
+        self.assertTrue(self.service.deliver_photos(42, "telegram-1", uncertain).error)
+        self.assertFalse(self.new_service().deliver_photos(42, "telegram-1", uncertain).delivered)
+        self.assertEqual(len(attempts), 1)
         self.assertEqual(self.kickoff(), reply)
         self.assertIn("#connect=browser-dayform", reply)
         self.assertTrue(self.service.active_for(42))
@@ -264,7 +265,7 @@ class ShoppingIntegrationTests(unittest.TestCase):
         receipt["output"]["recommendations"][0]["image"] = "/missing.png"
         self.service.save(state)
         photos = []
-        self.assertEqual(len(self.service.deliver_photos(42, "telegram-1", lambda *a: photos.append(a))), 1)
+        self.assertTrue(self.service.deliver_photos(42, "telegram-1", lambda *a: photos.append(a)).error)
         self.assertEqual(photos, [])
         self.assertIn("This pair.", self.kickoff())
 
@@ -305,28 +306,37 @@ class ShoppingIntegrationTests(unittest.TestCase):
         atomic_write(registry_path(self.root), json.dumps({"apps": [app.__dict__ for app in self.apps.values()]}))
         chat = Chat()
         photos = []
-        def send_photo(token, chat_id, content, mime, caption):
-            self.assertTrue(chat.sent, "text must be delivered before product photos")
-            photos.append((chat_id, content, mime, caption))
-            return len(photos)
+        def send_photos(token, chat_id, images, caption):
+            self.assertFalse(chat.sent, "an album replaces the separate text recommendation")
+            photos.append((chat_id, images, caption))
+            return {"message_ids": [len(photos) * 2, len(photos) * 2 + 1], "media_group_id": f"album-{len(photos)}"}
         with patch("ruth.app.core.ensure_long_term_memory"), patch("ruth.app.core.RuthApplication._maybe_start_lineage_worker"), \
-                patch("ruth.shopping.photos.send_product_photo", side_effect=send_photo):
+                patch("ruth.shopping.photos.send_product_photos", side_effect=send_photos) as sender:
             bot = RuthApplication(load_identity(), self.root, chat, runtime=Runtime(),
                                   repository=BranchlessRepositoryFixture(), review=IndependentReviewFixture())
             bot.handle_event(ChatEvent(cursor="1", conversation_id=42, message_id="1", text="/shop work sneakers under $120, US 9"))
-            self.assertIn("Two options", chat.sent[-1][1])
-            self.assertEqual(len(photos), 2)
+            self.assertIn("Two options", photos[-1][2])
+            self.assertEqual(len(photos), 1)
             bot.handle_event(ChatEvent(cursor="1", conversation_id=42, message_id="1", text="/shop work sneakers under $120, US 9"))
-            self.assertEqual(len(photos), 2, "duplicate events must not resend photos")
+            self.assertEqual(len(photos), 1, "duplicate events must not resend the album")
             self.message("dayform", "day-one")
             with bot._conversation_lock:
                 self.assertEqual(bot._shopping_service().poll_once(42), [])
             bot.handle_event(ChatEvent(cursor="2", conversation_id=42, message_id="2", text="Comfort matters most."))
             self.assertEqual({key for key, _ in brain.calls}, {"telegram:42"})
             self.assertEqual(len(brain.calls), 3)
-            self.assertEqual(len(chat.sent), 2, "app replies belong in the app, not Telegram")
-            self.assertEqual(len(photos), 4, "both Telegram recommendation turns have catalog photos")
+            self.assertEqual(len(chat.sent), 0, "albums replace Telegram text; app replies stay in the app")
+            self.assertEqual(len(photos), 2, "each Telegram recommendation turn produces one album")
             self.assertEqual(len(self.transcript("dayform")["outputs"]), 1)
+            sender.side_effect = ShoppingError("Unknown album delivery outcome")
+            third = ChatEvent(cursor="3", conversation_id=42, message_id="3", text="Show them again.")
+            bot.handle_event(third)
+            self.assertEqual(len(chat.sent), 1, "failed album falls back to one full text recommendation")
+            self.assertIn("Two options", chat.sent[0][1])
+            self.assertIn("#connect=browser-dayform", chat.sent[0][1])
+            bot.handle_event(third)
+            self.assertEqual(sender.call_count, 3, "ambiguous uploads must not replay")
+            self.assertEqual(len(chat.sent), 1)
 
     def test_unavailable_runtime_has_bounded_attempts_and_no_purchase(self):
         self.kickoff()

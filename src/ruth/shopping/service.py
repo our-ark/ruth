@@ -111,37 +111,40 @@ class ShoppingService:
             self.save(state)
         return receipt["output"]["text"]
 
-    def deliver_photos(self, chat_id, event_id, send_photo):
-        """Supplement a delivered Telegram answer once, without another model turn.
+    def deliver_photos(self, chat_id, event_id, send_photos):
+        """Deliver the recommendation as one album; the caller handles text fallback.
 
-        An interrupted/ambiguous upload is not replayed: Telegram has no sendPhoto
-        idempotency key. Text and links remain available when an image fails.
+        Claim the whole album before upload. Never blindly retry an ambiguous send.
         """
+        from .photos import PhotoDelivery, recommendation_caption
+
         with file_transaction(self.path):
             state = self.load()
             if not state.get("task") or state["task"]["chat_id"] != chat_id:
-                return []
+                return PhotoDelivery()
             receipt = state["receipts"].get("chat-" + stable_id(event_id), {})
             cards = receipt.get("output", {}).get("recommendations", [])
-            errors = []
-            for card in cards:
-                key = stable_id(card["app_id"] + ":" + card["product_id"])
-                deliveries = receipt.setdefault("photos", {})
-                if key in deliveries:
-                    continue
-                deliveries[key] = {"status": "attempted"}
-                self.save(state)  # Claim before sending; never blindly replay an uncertain upload.
-                try:
+            if not cards:
+                return PhotoDelivery()
+            previous = receipt.get("photo_album")
+            if previous:
+                return PhotoDelivery(previous["status"] == "delivered", previous.get("error", ""))
+            receipt["photo_album"] = {"status": "attempted"}
+            self.save(state)
+            try:
+                photos = []
+                for card in cards:
                     app = self.apps[card["app_id"]]
-                    content, mime = self.effect(app.image, card["image"])
-                    from .photos import product_caption
-                    message_id = self.effect(send_photo, chat_id, content, mime, product_caption(card))
-                    deliveries[key] = {"status": "delivered", "message_id": message_id}
-                except ShoppingError as error:
-                    deliveries[key] = {"status": "failed", "error": str(error)}
-                    errors.append(str(error))
+                    photos.append(self.effect(app.image, card["image"]))
+                caption = recommendation_caption(cards, receipt["output"].get("recommendation_intro", ""))
+                result = self.effect(send_photos, chat_id, photos, caption)
+                receipt["photo_album"] = {"status": "delivered", **result}
+            except ShoppingError as error:
+                receipt["photo_album"] = {"status": "failed", "error": str(error)}
                 self.save(state)
-            return errors
+                return PhotoDelivery(error=str(error))
+            self.save(state)
+            return PhotoDelivery(delivered=True)
 
     def poll_once(self, chat_id=None):
         with file_transaction(self.path):
@@ -256,6 +259,7 @@ class ShoppingService:
                     continue
                 if receipt.get("order"):
                     reply = self._order_text(receipt["order"])
+                intro = reply
                 recommendations = decision.get("recommendations", []) if not receipt.get("order") else []
                 cards, seen = [], set()
                 for ref in (recommendations if isinstance(recommendations, list) else [])[:6]:
@@ -282,6 +286,7 @@ class ShoppingService:
                           "shared_context": shared}
                 if cards:
                     output["recommendations"] = cards
+                    output["recommendation_intro"] = intro
                 return output
             try:
                 app = self.apps[decision["app_id"]]

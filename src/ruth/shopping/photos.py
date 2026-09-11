@@ -5,6 +5,8 @@ The caller owns authorization, epoch fencing and durable delivery receipts.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from html import escape
 import json
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener
@@ -13,43 +15,88 @@ from uuid import uuid4
 from .client import NoRedirect, ShoppingError
 
 
-def product_caption(card):
-    title = f"{card['app_name'][:80]} · {card['name'][:120]}"
-    price = f"${card['price_cents'] / 100:.2f} · ${card['total_cents'] / 100:.2f} total (mock tax included)"
-    description = str(card.get("description", ""))[:180]
-    caption = f"{title}\n{price}\n{description}\n\nOpen product:\n{card['link']}"
-    # Do not truncate an account-connection link; the full link is also in the text reply.
-    if len(caption.encode("utf-16-le")) // 2 > 1024:
-        caption = f"{title}\n{price}\nOpen the product using the link in my recommendation."
-    return caption
+@dataclass(frozen=True)
+class PhotoDelivery:
+    delivered: bool = False
+    error: str = ""
 
 
-def send_product_photo(token, chat_id, content, mime, caption):
-    """Upload bytes with sendPhoto. Never expose token-bearing request errors."""
-    if mime not in {"image/png", "image/jpeg"} or not content or len(content) > 8_000_000:
-        raise ShoppingError("Unsupported product photo")
+def _units(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _clip(text, limit):
+    if _units(text) <= limit:
+        return text
+    # Keep Unicode characters intact and count Telegram's UTF-16 entity offsets.
+    return text.encode("utf-16-le")[:max(0, limit - 1) * 2].decode("utf-16-le", errors="ignore") + "…"
+
+
+def recommendation_caption(cards, intro=""):
+    """One album caption; photo order matches numbered, linked product entries."""
+    heading = f"{len(cards)} shopping option" + ("s" if len(cards) != 1 else "")
+    html, visible = [], []
+    for number, card in enumerate(cards, 1):
+        title = f"{number}. {_clip(card['app_name'], 24)} · {_clip(card['name'], 40)}"
+        price = f"${card['price_cents'] / 100:.2f} · ${card['total_cents'] / 100:.2f} total"
+        label = f"Open option {number}"
+        html.append(f'<b>{escape(title)}</b>\n{price}\n<a href="{escape(card["link"], quote=True)}">{label}</a>')
+        visible.append(f"{title}\n{price}\n{label}")
+    footer = "Totals include mock tax; shipping included."
+    base = heading + "\n\n" + "\n\n".join(visible) + "\n\n" + footer
+    room = min(320, 1024 - _units(base) - 2)
+    summary = _clip(intro.strip(), room) if intro and room > 1 else ""
+    return (f"<b>{heading}</b>\n\n" + (escape(summary) + "\n\n" if summary else "")
+            + "\n\n".join(html) + "\n\n" + footer)
+
+
+def send_product_photos(token, chat_id, photos, caption):
+    """One album upload (or one photo), with one shared HTML caption."""
+    if not 1 <= len(photos) <= 6:
+        raise ShoppingError("Expected 1–6 product photos")
+    for content, mime in photos:
+        if mime not in {"image/png", "image/jpeg"} or not content or len(content) > 8_000_000:
+            raise ShoppingError("Unsupported product photo")
+    multiple = len(photos) > 1
+    method = "sendMediaGroup" if multiple else "sendPhoto"
+    fields = {"chat_id": str(chat_id)}
+    names = [f"product_{i}" for i in range(len(photos))] if multiple else ["photo"]
+    if multiple:
+        media = [{"type": "photo", "media": "attach://" + name} for name in names]
+        # Only the first item has a caption, so the album has one shared description.
+        media[0].update(caption=caption, parse_mode="HTML")
+        fields["media"] = json.dumps(media)
+    else:
+        fields.update(caption=caption, parse_mode="HTML")
     boundary = "ruth-photo-" + uuid4().hex
     body = bytearray()
-    for name, value in (("chat_id", str(chat_id)), ("caption", caption), ("disable_notification", "true")):
+    for name, value in fields.items():
         body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
         body.extend(value.encode())
         body.extend(b"\r\n")
-    extension = "png" if mime == "image/png" else "jpg"
-    body.extend((f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; '
-                 f'filename="product.{extension}"\r\nContent-Type: {mime}\r\n\r\n').encode())
-    body.extend(content)
-    body.extend(f"\r\n--{boundary}--\r\n".encode())
-    request = Request(f"https://api.telegram.org/bot{token}/sendPhoto", data=bytes(body),
+    for name, (content, mime) in zip(names, photos):
+        extension = "png" if mime == "image/png" else "jpg"
+        body.extend((f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; '
+                     f'filename="{name}.{extension}"\r\nContent-Type: {mime}\r\n\r\n').encode())
+        body.extend(content)
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode())
+    request = Request(f"https://api.telegram.org/bot{token}/{method}", data=bytes(body),
                       headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
     try:
-        with build_opener(NoRedirect()).open(request, timeout=20) as response:
+        with build_opener(NoRedirect()).open(request, timeout=30) as response:
             result = json.loads(response.read(1_000_000))
     except HTTPError as error:
-        raise ShoppingError(f"Telegram rejected the product photo (HTTP {error.code})") from None
+        raise ShoppingError(f"Telegram rejected the recommendation (HTTP {error.code})") from None
     except (OSError, ValueError):
-        raise ShoppingError("Telegram photo delivery could not be confirmed") from None
-    message = result.get("result") if isinstance(result, dict) else None
-    message_id = message.get("message_id") if isinstance(message, dict) else None
-    if not isinstance(result, dict) or not result.get("ok") or type(message_id) is not int:
-        raise ShoppingError("Telegram photo delivery could not be confirmed")
-    return message_id
+        raise ShoppingError("Telegram recommendation delivery could not be confirmed") from None
+    payload = result.get("result") if isinstance(result, dict) else None
+    messages = payload if multiple else [payload]
+    if (not isinstance(result, dict) or not result.get("ok") or not isinstance(messages, list)
+            or len(messages) != len(photos) or any(not isinstance(m, dict) or type(m.get("message_id")) is not int for m in messages)):
+        raise ShoppingError("Telegram recommendation delivery could not be confirmed")
+    groups = {m.get("media_group_id") for m in messages}
+    if multiple and (len(groups) != 1 or not next(iter(groups))):
+        raise ShoppingError("Telegram album delivery could not be confirmed")
+    return {"message_ids": [m["message_id"] for m in messages],
+            "media_group_id": messages[0].get("media_group_id")}
