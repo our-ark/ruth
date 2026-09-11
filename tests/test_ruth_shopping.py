@@ -209,6 +209,70 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.assertEqual(self.new_service().poll_once(42), [])
         self.assertEqual(len(self.brain.calls), calls)
 
+    def test_new_shop_can_order_same_product_without_losing_history_or_replaying_purchases(self):
+        self.kickoff()
+        first_task = self.service.load()["task"]["id"]
+        order_text = "Please place a simulated order for this pair in US 9, quantity 1, up to $85.80 total."
+        self.message("dayform", "day-one-lite", order_text)
+        self.assertEqual(self.service.poll_once(42), [])
+        first_order = self.transcript("dayform")["outputs"][-1]["order"]
+        reply = self.service.command(42, "telegram:42", "work sneakers, US 9, under $120 total", "telegram-2")
+        second_task = self.service.load()["task"]["id"]
+        self.assertNotEqual(first_task, second_task)
+        kickoff = self.brain.calls[-1][1]
+        self.assertEqual(kickoff["current_task"], {"id": second_task,
+                         "request": "work sneakers, US 9, under $120 total", "is_new_task": True})
+        self.assertEqual(kickoff["prior_orders"], [{"task_id": first_task, "order": first_order}])
+        self.assertIsNone(kickoff["current_request_order"])
+        second = self.message("dayform", "day-one-lite", order_text)
+        self.assertEqual(self.new_service().poll_once(42), [])
+        second_order = self.transcript("dayform")["outputs"][-1]["order"]
+        self.assertNotEqual(first_order["order_id"], second_order["order_id"])
+        self.assertEqual(first_order["product_id"], second_order["product_id"])
+        self.assertEqual(second_order["total_cents"], 8580)
+        turns = [p for _, p in self.brain.calls if p["turn"]["message"]["id"] == second["message"]["id"]]
+        self.assertGreaterEqual(len(turns), 2)
+        for turn in turns:
+            self.assertEqual(turn["current_task"]["id"], second_task)
+            self.assertEqual(turn["prior_orders"][0]["order"]["order_id"], first_order["order_id"])
+        self.assertIsNone(turns[0]["current_request_order"])
+        self.assertEqual(turns[-1]["current_request_order"], second_order)
+        # Re-delivering the same message and /shop events must not buy again or reset the task.
+        self.ui("dayform", "/ui/messages", {"id": second["message"]["id"], "session_id": second["session_id"],
+                "text": second["message"]["text"], "context": second["context"], "share_preferences": False})
+        self.assertEqual(self.new_service().poll_once(42), [])
+        self.assertEqual(self.service.command(42, "telegram:42", "work sneakers, US 9, under $120 total", "telegram-2"), reply)
+        self.kickoff()
+        self.assertEqual(self.service.load()["task"]["id"], second_task)
+        self.assertEqual({p[0] for p in self.brain.calls}, {"telegram:42"})
+        self.assertEqual({t["task_id"] for t in self.service.load()["conversation"]}, {first_task, second_task})
+        self.assertEqual(len(self.notifications), 2)
+        with self.servers["dayform"].store.transaction() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM orders").fetchone()[0], 2)
+
+    def test_explicit_repeat_order_in_one_task_is_distinct_from_delivery_retry(self):
+        self.kickoff()
+        first = self.service.telegram(42, "Please place a simulated order for Day One Lite, US 9, under $120 total.", "order-one")
+        task_id = self.service.load()["task"]["id"]
+        second = self.service.telegram(42, "Please place a simulated order for another pair of Day One Lite, US 9, under $120 total.", "order-two")
+        self.assertNotEqual(first, second)
+        self.assertEqual(task_id, self.service.load()["task"]["id"])
+        self.assertEqual(self.service.telegram(42, "Please place a simulated order for another pair of Day One Lite, US 9, under $120 total.", "order-two"), second)
+        with self.servers["dayform"].store.transaction() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM orders").fetchone()[0], 2)
+
+    def test_shop_retry_after_runtime_failure_keeps_one_task_identity(self):
+        service = self.new_service()
+        def unavailable(*_):
+            raise RuntimeError("runtime unavailable")
+        service.respond = unavailable
+        with self.assertRaises(ShoppingError):
+            service.command(42, "telegram:42", "work sneakers", "kickoff-retry")
+        task_id = service.load()["task"]["id"]
+        self.new_service().command(42, "telegram:42", "work sneakers", "kickoff-retry")
+        self.assertEqual(self.service.load()["task"]["id"], task_id)
+        self.assertEqual(self.brain.calls[-1][1]["current_task"]["id"], task_id)
+
     def test_web_order_photo_survives_restart_without_duplicate_confirmation(self):
         from unittest.mock import patch
         self.kickoff()

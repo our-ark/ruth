@@ -175,9 +175,15 @@ does not invoke reasoning again. Before submitting an order Ruth persists its
 exact payload/key. A lost order response retries that payload; the app returns
 the existing receipt. Failed Telegram notification is retried before the event
 is acknowledged. An order completes a purchase, not the shopping conversation:
-the bounded app registry remains connected until `/shop cancel`. The shared UI
-disables the order button while a reply is pending and shows **Order confirmed**
-for the product/size in a confirmed receipt. The existing Telegram provider's delivery guarantees still apply; a
+the bounded app registry remains connected until `/shop cancel`. Every new
+`/shop <request>` event starts a new task while preserving the same conversation
+and purchase history. Ruth receives the task identity and earlier orders separately
+from the current message's order receipt. A previous purchase may be mentioned,
+but does not prevent a new, explicit purchase of the same product and size.
+The shared UI disables ordering while a reply is pending, then offers
+**Order another pair** with a reminder of the previous purchase. Each distinct
+purchase request gets its own order key; replay of that request reuses its key.
+The existing Telegram provider's delivery guarantees still apply; a
 provider cannot guarantee exactly-once delivery after every ambiguous failure.
 
 There is one active shopping task and one user per registry. No SSE, presence

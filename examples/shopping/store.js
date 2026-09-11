@@ -5,6 +5,7 @@ const chat = document.querySelector("agent-chat");
 const productSelect = document.querySelector("#product");
 const sizeSelect = document.querySelector("#size");
 const orderButton = document.querySelector("#order");
+const orderHistory = document.querySelector("#order-history");
 const money = cents => new Intl.NumberFormat("en-US", {style:"currency", currency:"USD"}).format(cents / 100);
 let selected, revision;
 function updateOrderButton() {
@@ -13,6 +14,8 @@ function updateOrderButton() {
   orderButton.disabled = state.disabled;
   orderButton.textContent = state.text;
   orderButton.title = state.title;
+  orderHistory.textContent = state.notice;
+  orderHistory.hidden = !state.notice;
 }
 chat.addEventListener("agent-transcript", updateOrderButton);
 chat.addEventListener("agent-send-state", updateOrderButton);
@@ -48,7 +51,9 @@ sizeSelect.addEventListener("change", () => { revision = crypto.randomUUID(); up
 chat.contextProvider = () => ({revision, page_type:"product", product_id:selected.id, selected_size:sizeSelect.value});
 orderButton.addEventListener("click", () => {
   if (orderButton.disabled) return;
-  chat.input.value = `Please place a simulated order for this pair in US ${sizeSelect.value}, quantity 1, up to ${money(selected.total_cents)} total.`;
+  const state = orderButtonState(chat.transcript, selected.id, sizeSelect.value, chat.sending);
+  const item = state.repeat ? "another pair of this product" : "this pair";
+  chat.input.value = `Please place a simulated order for ${item} in US ${sizeSelect.value}, quantity 1, up to ${money(selected.total_cents)} total.`;
   chat.send(chat.input.value);
 });
 chat.addEventListener("agent-context", ({detail}) => {
