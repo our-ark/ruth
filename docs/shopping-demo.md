@@ -93,23 +93,6 @@ fall back to the full text confirmation; an uncertain send can produce a photo
 plus fallback text, but never triggers another purchase.
 One recommended product uses `sendPhoto` with the same caption format.
 
-The caption also includes **View all options**, a link to a user-side shortlist
-page. It shows the recommended products and tries to open each connected product
-URL in its own tab. Browsers may block automatic or multiple pop-ups. The page
-reports the result, offers **Open remaining products**, and keeps individual links
-available. Allow pop-ups for the shortlist origin to enable opening all tabs from
-one link; Telegram's in-app browser may require opening the link in a full browser.
-Window/tab presentation follows browser preferences. No browser permissions are
-changed by the demo. See [MDN window.open](https://developer.mozilla.org/en-US/docs/Web/API/Window/open).
-
-The demo runner serves this static launcher at `http://127.0.0.1:8010`
-(`--options-port` overrides the port). It serves only static files and public app
-origins, with no agent API or access to conversation state. Connected product
-links travel in the URL fragment, are removed from the address bar, and remain
-only in that tab's session storage. The launcher validates destinations against
-registered app origins and detaches its opener before navigating a product tab.
-Keep the full shortlist link private, just like individual connected store links.
-
 Ruth reads each catalog `image` from its registered app and uploads the bytes, so
 local demo images do not need a public image host. PNG/JPEG images are limited to 8 MB;
 cross-origin images and redirects are not followed, and image requests carry no
@@ -204,8 +187,8 @@ model turn; output/order idempotency protects the corresponding demo effects.
 
 ```bash
 python3.13 -m unittest tests.test_ruth_shopping -v
-python3.13 -m unittest tests.test_ruth_shopping_photos tests.test_ruth_shopping_options -q
-node tests/test_shopping_options_ui.cjs
+python3.13 -m unittest tests.test_ruth_shopping_photos -q
+node tests/test_shopping_order_ui.cjs
 python3.13 -m unittest tests.test_ruth_telegram tests.test_ruth_brain tests.test_ruth_application tests.test_ruth_command_registry -q
 ```
 

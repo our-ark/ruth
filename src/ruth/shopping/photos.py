@@ -32,7 +32,7 @@ def _clip(text, limit):
     return text.encode("utf-16-le")[:max(0, limit - 1) * 2].decode("utf-16-le", errors="ignore") + "…"
 
 
-def recommendation_caption(cards, intro="", view_all_url=""):
+def recommendation_caption(cards, intro=""):
     """One album caption; photo order matches numbered, linked product entries."""
     heading = f"{len(cards)} shopping option" + ("s" if len(cards) != 1 else "")
     html, visible = [], []
@@ -43,14 +43,10 @@ def recommendation_caption(cards, intro="", view_all_url=""):
         html.append(f'<b>{escape(title)}</b>\n{price}\n<a href="{escape(card["link"], quote=True)}">{label}</a>')
         visible.append(f"{title}\n{price}\n{label}")
     footer = "Totals include mock tax; shipping included."
-    all_label = "View all options ↗"
     base = heading + "\n\n" + "\n\n".join(visible) + "\n\n" + footer
-    if view_all_url:
-        base += "\n\n" + all_label
     room = min(320, 1024 - _units(base) - 2)
     summary = _clip(intro.strip(), room) if intro and room > 1 else ""
-    all_link = f'<a href="{escape(view_all_url, quote=True)}">{all_label}</a>\n\n' if view_all_url else ""
-    return (f"<b>{heading}</b>\n\n" + all_link + (escape(summary) + "\n\n" if summary else "")
+    return (f"<b>{heading}</b>\n\n" + (escape(summary) + "\n\n" if summary else "")
             + "\n\n".join(html) + "\n\n" + footer)
 
 

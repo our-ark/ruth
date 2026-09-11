@@ -19,31 +19,22 @@ SOURCE = Path(__file__).resolve().parents[3]
 EXAMPLES = SOURCE / "examples" / "shopping"
 
 
-def prepare(root, host="127.0.0.1", ports=(8011, 8012), options_port=8010):
+def prepare(root, host="127.0.0.1", ports=(8011, 8012)):
     path = registry_path(root)
     if not path.exists():
         apps = [{"app_id": app_id, "name": name, "base_url": f"http://{host}:{port}",
                  "token": secrets.token_urlsafe(32), "connect_token": secrets.token_urlsafe(32)}
                 for app_id, name, port in zip(("dayform", "stride"), ("DAYFORM", "STRIDE STUDIO"), ports)]
         atomic_write(path, json.dumps({"apps": apps}, indent=2) + "\n")
-    registry = json.loads(path.read_text())
-    options_url = f"http://{host}:{options_port}"
-    if registry.get("options_url", options_url) != options_url:
-        raise ValueError("Existing options page uses a different port; reuse --options-port.")
-    if "options_url" not in registry:
-        registry["options_url"] = options_url
-        atomic_write(path, json.dumps(registry, indent=2) + "\n")
     return load_registry(root)
 
 
-def servers(root, host="127.0.0.1", ports=(8011, 8012), options_port=8010):
+def servers(root, host="127.0.0.1", ports=(8011, 8012)):
     # Only the demo runner needs the SDK; Ruth's agent client has no SDK dependency.
     sys.path.insert(0, str(SOURCE / "libraries" / "app-sdk" / "src"))
     from our_ark_app_sdk import AppServer, CollaborationStore
 
-    from .options import OptionsServer
-
-    apps = prepare(root, host, ports, options_port)
+    apps = prepare(root, host, ports)
     built = []
     try:
         for app_id, port in zip(("dayform", "stride"), ports):
@@ -55,7 +46,6 @@ def servers(root, host="127.0.0.1", ports=(8011, 8012), options_port=8010):
             built.append(AppServer((host, port), store=store, agent_token=app.token,
                                    connect_token=app.connect_token, static_dir=EXAMPLES / app_id,
                                    public_origin=app.base_url, static_files={"/store.js": EXAMPLES / "store.js"}))
-        built.append(OptionsServer((host, options_port), [app.base_url for app in apps.values()]))
     except BaseException:
         for server in built:
             server.server_close()
@@ -70,18 +60,16 @@ def main():
     parser.add_argument("--host", choices=["127.0.0.1", "localhost"], default="127.0.0.1")
     parser.add_argument("--dayform-port", type=int, default=8011)
     parser.add_argument("--stride-port", type=int, default=8012)
-    parser.add_argument("--options-port", type=int, default=8010)
     args = parser.parse_args()
     root = args.root.resolve()
     if args.mode == "console":
         return console(root)
-    running = servers(root, args.host, (args.dayform_port, args.stride_port), args.options_port)
+    running = servers(root, args.host, (args.dayform_port, args.stride_port))
     for server in running:
         threading.Thread(target=server.serve_forever, daemon=True).start()
     print("Mock stores running. No payments or real orders.", flush=True)
     for app in load_registry(root).values():
         print(f"{app.name}: {app.base_url}", flush=True)
-    print(f"View all options: http://{args.host}:{args.options_port}", flush=True)
     print("Send /shop work sneakers, US 9, under $120 total to Ruth, or use the console runner.", flush=True)
     try:
         threading.Event().wait()

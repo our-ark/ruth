@@ -52,17 +52,3 @@ Day One Lite) through the same album delivery path. A single sendMediaGroup uplo
 returned three message IDs sharing one media_group_id, and the album receipt was
 recorded as delivered. This checks Telegram grouping and delivery for the demo
 catalogs, not remote access to the local stores or every Telegram client's layout.
-
-## View all options
-
-The launcher update passes 22 shopping/album/launcher tests plus a JavaScript
-popup-control test. The latter simulates a partially blocked launch and verifies
-that retry opens only the remaining products, with the opener detached before
-store navigation. HTTP checks verify that the launcher serves no agent endpoints,
-rejects writes, and keeps browser connection tokens out of its server responses.
-
-An isolated browser walkthrough opened one shortlist link and observed three
-product tabs: Day One, Arc 01, and Day One Lite across the two stores. Each tab
-showed the expected product and a connected Ruth chat. This browser allowed the
-automatic tab opens; browser-specific popup permissions can require an additional
-click or individual product links elsewhere.

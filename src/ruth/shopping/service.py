@@ -135,8 +135,7 @@ class ShoppingService:
                 for card in cards:
                     app = self.apps[card["app_id"]]
                     photos.append(self.effect(app.image, card["image"]))
-                caption = recommendation_caption(cards, receipt["output"].get("recommendation_intro", ""),
-                                                 receipt["output"].get("view_all_url", ""))
+                caption = recommendation_caption(cards, receipt["output"].get("recommendation_intro", ""))
                 result = self.effect(send_photos, chat_id, photos, caption)
                 receipt["photo_album"] = {"status": "delivered", **result}
             except ShoppingError as error:
@@ -319,13 +318,8 @@ class ShoppingService:
                 if receipt.get("order"):
                     output["order"] = receipt["order"]
                 if cards:
-                    from .options import options_link
                     output["recommendations"] = cards
                     output["recommendation_intro"] = intro
-                    view_all = options_link(self.root, cards, self.apps)
-                    if view_all:
-                        output["view_all_url"] = view_all
-                        output["text"] += "\n\nView all options:\n" + view_all
                 return output
             try:
                 app = self.apps[decision["app_id"]]
