@@ -1,10 +1,21 @@
 import "/sdk/agent-chat.js";
+import {orderButtonState} from "/sdk/order-state.js";
 
 const chat = document.querySelector("agent-chat");
 const productSelect = document.querySelector("#product");
 const sizeSelect = document.querySelector("#size");
+const orderButton = document.querySelector("#order");
 const money = cents => new Intl.NumberFormat("en-US", {style:"currency", currency:"USD"}).format(cents / 100);
 let selected, revision;
+function updateOrderButton() {
+  if (!selected) return;
+  const state = orderButtonState(chat.transcript, selected.id, sizeSelect.value, chat.sending);
+  orderButton.disabled = state.disabled;
+  orderButton.textContent = state.text;
+  orderButton.title = state.title;
+}
+chat.addEventListener("agent-transcript", updateOrderButton);
+chat.addEventListener("agent-send-state", updateOrderButton);
 const response = await fetch("/products");
 if (!response.ok) throw new Error("The catalog is unavailable");
 const {products} = await response.json();
@@ -27,14 +38,16 @@ function render() {
   sizeSelect.value = selected.sizes.includes(size) ? size : selected.sizes.includes("9") ? "9" : selected.sizes[0];
   document.querySelector("#total").textContent = `${money(selected.total_cents)} with mock tax · Shipping included`;
   history.replaceState(null, "", `/?product=${selected.id}${location.hash}`);
+  updateOrderButton();
 }
 const requested = new URLSearchParams(location.search).get("product");
 if (products.some(p => p.id === requested)) productSelect.value = requested;
 render();
 productSelect.addEventListener("change", render);
-sizeSelect.addEventListener("change", () => { revision = crypto.randomUUID(); });
+sizeSelect.addEventListener("change", () => { revision = crypto.randomUUID(); updateOrderButton(); });
 chat.contextProvider = () => ({revision, page_type:"product", product_id:selected.id, selected_size:sizeSelect.value});
-document.querySelector("#order").addEventListener("click", () => {
+orderButton.addEventListener("click", () => {
+  if (orderButton.disabled) return;
   chat.input.value = `Please place a simulated order for this pair in US ${sizeSelect.value}, quantity 1, up to ${money(selected.total_cents)} total.`;
   chat.send(chat.input.value);
 });

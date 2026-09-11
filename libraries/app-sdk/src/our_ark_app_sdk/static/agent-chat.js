@@ -74,6 +74,7 @@ export class AgentChat extends HTMLElement {
     text = text.trim();
     if (!text || this.sending) return;
     this.sending = true;
+    this.dispatchEvent(new CustomEvent("agent-send-state", {bubbles: true}));
     const button = this.form.querySelector('button[type="submit"]');
     button.disabled = true;
     this.error.textContent = "";
@@ -89,7 +90,10 @@ export class AgentChat extends HTMLElement {
       await this.refresh();
     } catch (error) {
       this.error.textContent = `${error.message} Your message is saved here; Send retries the same message.`;
-    } finally { this.sending = false; button.disabled = false; }
+    } finally {
+      this.sending = false; button.disabled = false;
+      this.dispatchEvent(new CustomEvent("agent-send-state", {bubbles: true}));
+    }
   }
 
   async refresh() {
@@ -97,6 +101,8 @@ export class AgentChat extends HTMLElement {
     const signature = JSON.stringify(data);
     if (this.lastSignature === signature) return;
     this.lastSignature = signature;
+    this.transcript = data;
+    this.dispatchEvent(new CustomEvent("agent-transcript", {detail: data, bubbles: true}));
     this.messages.replaceChildren();
     if (!data.messages.length) {
       const intro = document.createElement("p");

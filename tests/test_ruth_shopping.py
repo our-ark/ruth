@@ -160,7 +160,7 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.assertIn("$107.80", self.notifications[0][1])
         self.assertEqual(self.notifications[0][0], 42)
         self.assertIn("Simulated order confirmed", self.transcript("dayform")["outputs"][0]["text"])
-        self.assertFalse(self.service.active_for(42))
+        self.assertTrue(self.service.active_for(42))
 
     def test_notification_failure_does_not_end_task_or_repeat_order(self):
         self.kickoff()
@@ -171,11 +171,12 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.assertEqual(self.new_service().poll_once(42), [])
         self.assertEqual(len(self.brain.calls), calls)
         self.assertEqual(len(self.transcript("dayform")["outputs"]), 1)
-        self.assertFalse(self.service.active_for(42))
+        self.assertTrue(self.service.active_for(42))
 
     def test_cancel_stops_connections_but_retains_conversation_and_queued_messages(self):
         self.kickoff()
         self.service.command(42, "telegram:42", "cancel", "cancel-1")
+        self.assertFalse(self.service.active_for(42))
         self.message("dayform", "day-one")
         self.assertEqual(self.service.poll_once(42), [])
         self.assertEqual(len(self.brain.calls), 1)
@@ -184,6 +185,29 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.service.load()["conversation"]), 3)
         with self.assertRaises(ShoppingError):
             self.service.command(99, "telegram:99", "shoes", "wrong-owner")
+
+    def test_order_does_not_disconnect_followups_in_either_store_or_telegram(self):
+        self.kickoff()
+        self.message("dayform", "day-one-lite", "Please place a simulated order in US 9, up to $120 total.")
+        self.message("dayform", "day-one-lite", "Remind me which size I selected?")
+        self.message("stride", "arc-01", "How does this compare to the pair I ordered?")
+        self.assertEqual(self.service.poll_once(42), [])
+        outputs = self.transcript("dayform")["outputs"]
+        self.assertEqual(len(outputs), 2, "messages queued after an order must still be handled")
+        self.assertEqual(outputs[0]["order"]["product_id"], "day-one-lite")
+        self.assertEqual(outputs[0]["order"]["size"], "9")
+        self.assertIn("day-one-lite", self.transcript("stride")["outputs"][0]["text"])
+        self.assertTrue(self.new_service().active_for(42), "restart must preserve the connection")
+        self.service.telegram(42, "Thanks. Show me the options again.", "post-order")
+        self.assertEqual({key for key, _ in self.brain.calls}, {"telegram:42"})
+        self.assertEqual(len(self.notifications), 1, "follow-ups must not repeat the order notification")
+        with self.servers["dayform"].store.transaction() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM orders").fetchone()[0], 1)
+        self.service.command(42, "telegram:42", "cancel", "done")
+        self.message("stride", "arc-01", "This stays queued until I resume.")
+        calls = len(self.brain.calls)
+        self.assertEqual(self.new_service().poll_once(42), [])
+        self.assertEqual(len(self.brain.calls), calls)
 
     def test_web_order_photo_survives_restart_without_duplicate_confirmation(self):
         from unittest.mock import patch
@@ -210,7 +234,7 @@ class ShoppingIntegrationTests(unittest.TestCase):
         for fact in (order["order_id"], "Day One Lite / Ink", "US 9", "$85.80", "No payment was taken."):
             self.assertIn(fact, caption)
         self.assertEqual(self.notifications, [], "photo caption replaces a separate text confirmation")
-        self.assertFalse(service.active_for(42))
+        self.assertTrue(service.active_for(42))
         self.assertEqual(len(self.transcript("dayform")["outputs"]), 1)
         with self.servers["dayform"].store.transaction() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM orders").fetchone()[0], 1)
@@ -230,7 +254,7 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.brain.calls), calls)
         self.assertEqual(len(self.notifications), 1)
         self.assertIn("$85.80", self.notifications[0][1])
-        self.assertFalse(self.service.active_for(42))
+        self.assertTrue(self.service.active_for(42))
         with self.servers["dayform"].store.transaction() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM orders").fetchone()[0], 1)
 
@@ -247,13 +271,13 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.notifications), 1)
         self.assertIn("Simulated order confirmed", self.notifications[0][1])
         self.assertIn("$85.80", self.notifications[0][1])
-        self.assertFalse(self.service.active_for(42))
+        self.assertTrue(self.service.active_for(42))
 
-    def test_telegram_order_photo_uses_order_facts_after_task_ends(self):
+    def test_telegram_order_photo_uses_order_facts_and_keeps_conversation_active(self):
         from unittest.mock import patch
         self.kickoff()
         text = self.service.telegram(42, "Please place a simulated order for Day One Lite, US 9, up to $120 total.", "telegram-order")
-        self.assertFalse(self.service.active_for(42))
+        self.assertTrue(self.service.active_for(42))
         photos = []
         def sent(*args):
             photos.append(args)

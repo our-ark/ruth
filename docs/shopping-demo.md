@@ -47,7 +47,8 @@ service. Console notifications print in the terminal. Its session is
 5. Return to DAYFORM. Choose a size and say “Place a simulated order for this
    pair in US 9, quantity 1, up to $120 total,” or use **Ask Ruth to order**.
 6. The source chat receives the result; the console receives an order
-   notification. Store polling then stops. `/shop cancel` also stops polling;
+   notification. Ruth continues listening for follow-up questions in both stores.
+   `/shop cancel` stops polling;
    `/shop status` reports whether it is active.
 
 Day One costs $98 ($107.80 including mock tax); Arc 02 costs $112 ($123.20
@@ -187,8 +188,11 @@ production login design; keep this reference server on loopback.
 Output is stored before delivery. An output retry keeps the original ID and
 does not invoke reasoning again. Before submitting an order Ruth persists its
 exact payload/key. A lost order response retries that payload; the app returns
-the existing receipt. Failed Telegram notification is retried before polling
-ends. The existing Telegram provider's delivery guarantees still apply; a
+the existing receipt. Failed Telegram notification is retried before the event
+is acknowledged. An order completes a purchase, not the shopping conversation:
+the bounded app registry remains connected until `/shop cancel`. The shared UI
+disables the order button while a reply is pending and shows **Order confirmed**
+for the product/size in a confirmed receipt. The existing Telegram provider's delivery guarantees still apply; a
 provider cannot guarantee exactly-once delivery after every ambiguous failure.
 
 There is one active shopping task and one user per registry. No SSE, presence

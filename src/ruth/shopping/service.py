@@ -106,10 +106,6 @@ class ShoppingService:
             receipt["output"] = self._reason(state, turn, key, kickoff=kickoff)
             self._journal(state, key, turn, receipt["output"])
             self.save(state)
-        if receipt.get("order"):
-            # The caller's existing Telegram outbox handles durable delivery.
-            state["task"]["active"] = False
-            self.save(state)
         return receipt["output"]["text"]
 
     def deliver_photos(self, chat_id, event_id, send_photos):
@@ -245,8 +241,6 @@ class ShoppingService:
             receipt["recorded"] = True
         state["cursors"][app_id] = event["cursor"]
         receipt["completed"] = True
-        if receipt.get("order"):
-            task["active"] = False
         self.save(state)
 
     def _reason(self, state, turn, key, kickoff=False):
@@ -280,7 +274,8 @@ class ShoppingService:
                 # A confirmed order must still be delivered even when reasoning is unavailable.
                 if receipt.get("order"):
                     return {"id": key, "in_reply_to": turn["message"]["id"],
-                            "text": self._order_text(receipt["order"]), "shared_context": {}}
+                            "text": self._order_text(receipt["order"]), "shared_context": {},
+                            "order": receipt["order"]}
                 raise ShoppingError(f"Ruth's runtime could not answer ({type(error).__name__}); retry pending") from None
             try:
                 decision = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
@@ -321,6 +316,8 @@ class ShoppingService:
                 shared = self._shared_context(decision.get("shared_context")) if turn.get("share_preferences") else {}
                 output = {"id": key, "in_reply_to": turn["message"]["id"], "text": reply,
                           "shared_context": shared}
+                if receipt.get("order"):
+                    output["order"] = receipt["order"]
                 if cards:
                     from .options import options_link
                     output["recommendations"] = cards

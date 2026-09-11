@@ -1,0 +1,22 @@
+// Exercise the shared order control across pending replies, refresh and product switches.
+const assert = require('node:assert/strict');
+const {readFileSync} = require('node:fs');
+const vm = require('node:vm');
+const scope = vm.createContext({});
+vm.runInContext(readFileSync('libraries/app-sdk/src/our_ark_app_sdk/static/order-state.js', 'utf8').replace('export function', 'function'), scope);
+const state = scope.orderButtonState;
+const pending = {messages: [{message:{id:'one'}, context:{product_id:'day-one-lite', selected_size:'9'}}], outputs: []};
+assert.equal(state(undefined, 'day-one-lite', '9').disabled, false);
+assert.equal(state(undefined, 'day-one-lite', '9', true).disabled, true, 'disable immediately on submission');
+assert.equal(state(pending, 'day-one-lite', '9').text, 'Waiting for Ruth…');
+assert.equal(state(pending, 'day-one', '9').disabled, false, 'pending request is bound to its product');
+pending.outputs.push({in_reply_to:'one', text:'Please clarify your choice.'});
+assert.equal(state(pending, 'day-one-lite', '9').disabled, false, 'a clarification enables the button again');
+pending.outputs[0].order = {status:'confirmed', product_id:'day-one-lite', size:'9', order_id:'DAYFORM-TEST'};
+const confirmed = state(JSON.parse(JSON.stringify(pending)), 'day-one-lite', '9');
+assert.equal(confirmed.text, 'Order confirmed');
+assert.equal(confirmed.disabled, true, 'confirmed order remains visible after restoring the transcript');
+assert.equal(confirmed.title, 'DAYFORM-TEST');
+assert.equal(state(pending, 'day-one-lite', '10').disabled, false, 'confirmation applies only to the ordered size');
+assert.equal(state(pending, 'day-one', '9').disabled, false);
+console.log('Shared order button: pending, clarification, receipt restoration and product/size isolation passed.');
