@@ -1,0 +1,14 @@
+[project]
+name = "our-ark-agent-sdk"
+version = "0.1.0"
+description = "UAAP agent SDK for connecting personal agents to application-hosted interfaces"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
