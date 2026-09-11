@@ -1,0 +1,4 @@
+[
+  {"id":"arc-02","name":"Arc 02 / Graphite","price_cents":11200,"currency":"USD","sizes":["8","9","10","11"],"color":"Graphite","description":"A sculpted city sneaker with a slim fit and moderate cushioning. A sharper silhouette for the office.","fit":"slim","cushioning":"moderate","tags":["sneakers","shoes","work","walking","design"],"image":"/shoe.png"},
+  {"id":"arc-01","name":"Arc 01 / Graphite","price_cents":8900,"currency":"USD","sizes":["8","9","10"],"color":"Graphite","description":"A classic low-profile city sneaker with a standard fit and moderate cushioning. The simpler studio edition.","fit":"standard","cushioning":"moderate","tags":["sneakers","shoes","work","walking","design"],"image":"/shoe.png"}
+]

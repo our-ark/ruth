@@ -7,9 +7,9 @@ Ruth is an independently versioned personal agent descended from
 [Genesis](https://github.com/our-ark/genesis). This repository contains her
 software body; each local instance has its own private state.
 
-The Enoch foundation is initialized and has passed its inherited creation
-tests. Ruth's cross-application message and context protocol is planned work;
-it is not implemented by this initial import.
+Ruth includes a local cross-application shopping prototype: two mock stores
+share an app API and chat UI SDK, while `/shop` connects them to Ruth's existing
+conversation and model runtime. See the [runnable walkthrough](docs/shopping-demo.md).
 
 ## Mission
 
@@ -55,17 +55,31 @@ Use Ruth's own Telegram bot and authorized chat. After configuring them,
 `bin/ruth-daemon start` starts the instance. The provider supports interactive
 setup so credentials need not be committed to code.
 
-## Planned collaboration skill
+## Application collaboration
 
 Applications contribute local state and domain intelligence. Ruth contributes
 the user's continuing context, preferences, and goals. The same conversation
 continues across Telegram and participating applications.
 
-The initial protocol focuses on message delivery and bidirectional context
-exchange. Ruth opens outbound connections to a small set of applications for
-an active task, using app-hosted SSE event streams or bounded polling. Apps
-report activity and page context through those connections. Actions can use
-the apps' existing APIs. See [the design boundary](docs/app-collaboration.md).
+The prototype focuses on message delivery and bidirectional context exchange.
+Ruth polls two registered apps during an active shopping task. Each message
+carries its page/product snapshot, and each answer goes back to its source
+session. Ordinary product APIs support search, details and simulated orders.
+No dynamic user tracking or public inbound Ruth endpoint is required.
+
+All code is in this repository: `libraries/app-sdk`, `examples/shopping`, and
+`src/ruth/shopping`. The SDK is independent of Ruth's runtime. Try the local
+stores and real-model console in two terminals:
+
+```bash
+bin/ruth-shopping-demo serve --root "$PWD/.ruth/shopping-demo"
+bin/ruth-shopping-demo console --root "$PWD/.ruth/shopping-demo"
+```
+
+Then enter `/shop work sneakers, US 9, under $130 total` in the console. The
+[walkthrough](docs/shopping-demo.md) also explains how to use the same flow
+through the instance's configured Telegram bot. See the broader
+[design boundary](docs/app-collaboration.md) for future extensions.
 
 ## Provenance
 

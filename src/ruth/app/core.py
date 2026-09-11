@@ -579,6 +579,11 @@ class RuthApplication:
         self._lineage_worker_lock = threading.Lock()
         self._task_cancellations: dict[int, threading.Event] = {}
         self._stopping = False
+        # Telegram and application turns share the same runtime session and lock.
+        self._conversation_lock = threading.RLock()
+        self._shopping = None
+        self._shopping_worker = None
+        self._shopping_stop = threading.Event()
         reconcile_extension_schedules(
             {
                 extension.name: extension.schedules
@@ -630,6 +635,7 @@ class RuthApplication:
     def run_forever(self) -> None:
         self.start()
         self._start_cron_scheduler()
+        self._start_shopping_worker()
         try:
             while True:
                 try:
@@ -642,6 +648,9 @@ class RuthApplication:
                     print(f"Ruth {provider_label(self.channel_name)} polling error: {error}")
                     time.sleep(5)
         finally:
+            self._shopping_stop.set()
+            if self._shopping_worker is not None:
+                self._shopping_worker.join(timeout=6)
             self._stop_cron_scheduler()
 
     def notify_startup(self) -> None:
@@ -769,6 +778,10 @@ class RuthApplication:
         return self.workflow.find(result.task_id)
 
     def handle_event(self, event: ChatEvent) -> None:
+        with self._conversation_lock:
+            self._handle_event_locked(event)
+
+    def _handle_event_locked(self, event: ChatEvent) -> None:
         require_current_daemon_epoch(self.daemon_epoch, self.root)
         chat_id = event.conversation_id
         message_id = event.message_id
@@ -1083,6 +1096,7 @@ class RuthApplication:
                 ]
             ),
             "help": lambda: self._help(argument),
+            "shop": lambda: self._shop(chat_id, argument),
             "ancestors": lambda: self._ancestors(chat_id, text),
             "inherit": lambda: self._inherit(chat_id, text),
             "mission": lambda: self._mission(text),
@@ -1658,7 +1672,80 @@ class RuthApplication:
             )
 
     def _natural(self, chat_id: ConversationId, text: str) -> str:
+        from ruth.shopping.client import ShoppingError
+
+        try:
+            shopping = self._shopping_service()
+        except ShoppingError:
+            shopping = None  # A broken optional registry must not block ordinary conversation.
+        if shopping is not None and shopping.active_for(chat_id):
+            try:
+                return shopping.telegram(chat_id, text, _CURRENT_EVENT_KEY.get())
+            except ShoppingError as error:
+                return str(error)
         return self._natural_with_session(chat_id, text, session_key=self._session_key(chat_id))
+
+    def _shopping_service(self):
+        from ruth.shopping.client import registry_path
+        from ruth.shopping.service import ShoppingService
+
+        if self._shopping is None and registry_path(self.root).exists():
+            self._shopping = ShoppingService(
+                self.root,
+                respond=lambda prompt, key: self._invoke_runtime_response(
+                    prompt, execution=RuntimeExecutionControl(
+                        request_id="shopping-conversation", session_key=key,
+                        cancellation_event=self._shopping_stop,
+                    ),
+                ).final_text,
+                notify=lambda chat_id, text, key: self._deliver_message(
+                    chat_id, text, notification_key=key,
+                ).delivered,
+                record=self._record_turn,
+                effect=self.effect_fence.run,
+            )
+        return self._shopping
+
+    def _shop(self, chat_id, argument):
+        from ruth.shopping.client import ShoppingError
+
+        if _allowed_conversation_id(self.client) != chat_id:
+            return "Lock Ruth to your conversation before connecting shopping accounts."
+        try:
+            shopping = self._shopping_service()
+            if shopping is None:
+                return "Shopping is not configured. Run bin/ruth-shopping-demo serve for this instance first."
+            return shopping.command(chat_id, self._session_key(chat_id), argument, _CURRENT_EVENT_KEY.get())
+        except ShoppingError as error:
+            return str(error)
+
+    def _start_shopping_worker(self):
+        if self._shopping_worker is not None:
+            return
+
+        def poll():
+            previous_error = ""
+            while not self._shopping_stop.wait(1):
+                try:
+                    with self._conversation_lock:
+                        self.effect_fence.require_current()
+                        shopping = self._shopping_service()
+                        owner = _allowed_conversation_id(self.client)
+                        errors = shopping.poll_once(owner) if shopping and owner is not None else []
+                    summary = "; ".join(errors)
+                    if summary and summary != previous_error:
+                        print(f"Ruth shopping: {summary}")
+                    previous_error = summary
+                except StaleDaemonEpoch:
+                    return
+                except Exception as error:
+                    summary = str(error)
+                    if summary != previous_error:
+                        print(f"Ruth shopping paused this poll: {summary}")
+                    previous_error = summary
+
+        self._shopping_worker = threading.Thread(target=poll, name="ruth-shopping", daemon=True)
+        self._shopping_worker.start()
 
     def _natural_with_session(
         self,

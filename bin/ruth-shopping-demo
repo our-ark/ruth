@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+RUTH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$RUTH_ROOT/bin/_ruth-env"
+ruth_run_module ruth.shopping.demo "$@"

@@ -1,0 +1,171 @@
+# Run the One Agent, Anywhere prototype
+
+All source is in this repository. No external demo checkout is needed.
+
+| Location | Responsibility |
+| --- | --- |
+| `libraries/app-sdk` | Independent Python app adapter, durable message/context store, shared browser chat component |
+| `examples/shopping/dayform` | Warm DAYFORM storefront and mock catalog |
+| `examples/shopping/stride` | Dark STRIDE STUDIO storefront and mock catalog |
+| `examples/shopping/store.js` | Shared product-page controller (served by both apps) |
+| `src/ruth/shopping` | Outbound app client, registry, tool orchestration, durable replies and task lifecycle |
+| `src/ruth/app/core.py` | `/shop`, existing runtime session, serialized Telegram/app turns, Telegram outbox |
+
+The two stores have separate HTTP origins, catalogs, account credentials,
+session histories and SQLite files. They import the same `/sdk/agent-chat.js`
+and CSS. `variant="sidebar"` and `variant="dock"` change the presentation.
+Neither store imports Ruth or calls a public agent endpoint.
+
+## Local walkthrough with the real model
+
+Requires Python 3.11+ and a working Ruth runtime (the inherited default is the
+authenticated Codex CLI). The SDK and demo servers use the Python standard
+library; no Node build or additional web framework is needed.
+
+From the Ruth checkout, start the stores:
+
+```bash
+bin/ruth-shopping-demo serve --root "$PWD/.ruth/shopping-demo"
+```
+
+In another terminal, use the **same root** for the console:
+
+```bash
+bin/ruth-shopping-demo console --root "$PWD/.ruth/shopping-demo"
+```
+
+This console runs Ruth's configured model; it has no canned response mode. It
+substitutes local input/output for Telegram while using the same shopping
+service. Console notifications print in the terminal. Its session is
+`console:demo`, deliberately separate from a live Telegram instance.
+
+1. `/shop work sneakers for my walk to the office, US 9, under $130 total. Compare Day One and Arc 02.`
+2. Open both recommendation links. They connect your preconfigured demo account
+   to the store chat. Plain store URLs let you browse but do not connect chat.
+3. In DAYFORM: “Would this pair be comfortable for my walk?”
+4. In STRIDE: “How does this compare with the first pair?”
+5. Return to DAYFORM. Choose a size and say “Place a simulated order for this
+   pair in US 9, quantity 1, up to $120 total,” or use **Ask Ruth to order**.
+6. The source chat receives the result; the console receives an order
+   notification. Store polling then stops. `/shop cancel` also stops polling;
+   `/shop status` reports whether it is active.
+
+Day One costs $98 ($107.80 including mock tax); Arc 02 costs $112 ($123.20
+including mock tax). A $120 total budget should exclude Arc 02. All catalog
+claims and orders are fictional. There are no payment or address APIs.
+
+For another run after completion, use `/shop <request>` again. This retains the
+conversation and app cursors. Messages submitted while polling is stopped stay
+queued until the next task. Store sessions are per browser tab and survive a
+reload; opening a new tab creates a new delivery session, not a new agent.
+
+## Telegram
+
+Use an instance containing this revision, with its existing runtime, Telegram
+provider, bot token and **locked conversation** configured as in the main
+README. Start the stores from that checkout with:
+
+```bash
+bin/ruth-shopping-demo serve
+```
+
+Then start/restart that instance's normal `bin/ruth-daemon`. Send `/shop ...`
+to its Telegram bot. The app turns reuse **that exact `telegram:<chat-id>`
+runtime session**, including previous Telegram conversation. Order notifications
+use Ruth's existing durable notification service. The app worker polls while
+Telegram's long poll is waiting; a shared lock serializes reasoning turns.
+
+If serving the websites from the source checkout for another instance, pass
+`--root /absolute/path/to/the/instance` to `serve`. The instance's own code must
+also include this revision. Do not run the console against a live Telegram
+instance: a demo registry is bound to one conversation.
+
+The default URLs are `http://127.0.0.1:8011` and `http://127.0.0.1:8012`.
+**Open them on the same computer as the servers.** They will not open from a
+phone's Telegram browser. Remote HTTPS deployment/account onboarding is outside
+this local demo. `--dayform-port` and `--stride-port` select other ports when
+creating a new demo root; reuse the configured ports thereafter.
+
+## Protocol and data ownership
+
+The agent-facing adapter exposes the two collaboration operations:
+
+- `GET /collaboration/events?after=<cursor>` returns up to 20 user messages,
+  each with `event_id`, `session_id`, `message`, `context`, `created_at`, and a
+  per-app integer cursor. It is a non-destructive read.
+- `POST /collaboration/sessions/<id>/outputs` accepts `id`, `in_reply_to`,
+  `text`, and optional `shared_context`. The SDK rejects replies to a different
+  session and conflicting reuse of an output ID.
+
+Ordinary app APIs implement `queryProduct` (`GET /products`), `getProduct`
+(`GET /products/<id>`), and `orderProduct` (`POST /orders`). Prices use integer
+USD cents. Query filters are `q`, `size`, and `max_price_cents`. Orders require
+product ID, size, quantity 1, maximum total and an idempotency key.
+
+The browser uses separate same-origin `/ui/*` routes. On send, the component
+freezes page revision, product ID and selected size. The app enriches the
+snapshot with its product facts. A later product selection cannot change a
+queued message. Ruth replies to its source session even if the user has moved.
+
+Checking **Share my shopping preferences with this store** authorizes only the
+current message's structured return context: shopping budget, shoe size and
+purpose. Both Ruth and the SDK enforce this metadata boundary. The store
+displays those preferences. Replies themselves may naturally discuss the
+cross-store comparison requested by the user. Other stores' transcripts and
+Ruth's full private memory are not synchronized into the app database.
+
+Ruth provides tool decisions as bounded JSON through the existing model runtime;
+the host validates tool arguments and invokes APIs. The model does not need
+network or shell access for shopping. Model-based interpretation of natural
+language order authorization is appropriate only for this simulated demo; it
+is not a production purchase authorization mechanism.
+
+## State and retries
+
+All generated state is ignored under the chosen root's `.ruth/` directory:
+
+- `shopping/registry.json`: local app origins and separate agent/browser
+  credentials. It is created with owner-only file permissions.
+- `shopping/state.json`: active task, app cursors, durable inbound/output/order
+  receipts and one continuing collaboration journal across tasks.
+- `demo-apps/dayform.sqlite`, `demo-apps/stride.sqlite`: app-owned reference
+  stores, colocated for this local demo.
+
+Each app has separate random credentials. Agent endpoints require a bearer
+token. Browser links carry a demo account capability in the fragment, exchanged
+for an HttpOnly same-origin cookie and removed from the address bar. The SDK
+checks Host/Origin, scopes sessions to the connected account and renders reply
+text without HTML. Restarting the servers requires reconnecting using a Ruth
+link. These preconnected demo bindings are not OAuth, multi-user tenancy or a
+production login design; keep this reference server on loopback.
+
+Output is stored before delivery. An output retry keeps the original ID and
+does not invoke reasoning again. Before submitting an order Ruth persists its
+exact payload/key. A lost order response retries that payload; the app returns
+the existing receipt. Failed Telegram notification is retried before polling
+ends. The existing Telegram provider's delivery guarantees still apply; a
+provider cannot guarantee exactly-once delivery after every ambiguous failure.
+
+There is one active shopping task and one user per registry. No SSE, presence
+broker, dynamic user tracking, dynamic discovery, real checkout, user study or
+model-quality benchmark is implemented. A crash during reasoning can repeat a
+model turn; output/order idempotency protects the corresponding demo effects.
+
+## Verification
+
+```bash
+python3.13 -m unittest tests.test_ruth_shopping -v
+python3.13 -m unittest tests.test_ruth_telegram tests.test_ruth_brain tests.test_ruth_application tests.test_ruth_command_registry -q
+```
+
+Use the instance's installed Python/dependencies, or Ruth's normal pinned
+dependency activation. Tests require local socket access. They use isolated
+temporary state and a deterministic reasoning fixture; they do not contact a
+real Telegram account or measure model quality. The integration tests cover
+three surfaces, shared session identity, message-time context, session routing,
+disclosure scope, cancellation/resume, restart, duplicate output delivery,
+ambiguous order outcomes and notification recovery.
+
+The product images and visual direction reuse the earlier Bob concept video;
+see [asset provenance](../examples/shopping/asset-provenance.md). That video
+remains a scripted concept, separate from this executable prototype.

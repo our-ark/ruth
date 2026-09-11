@@ -1,7 +1,9 @@
 # Application collaboration
 
-This is the intended scope of Ruth's next capability, not an implemented
-integration.
+This describes the broader application collaboration design. The initial
+[shopping prototype](shopping-demo.md) implements message delivery, context
+exchange and simulated actions with two apps. Activity tracking and SSE below
+remain future work; the prototype uses message-time snapshots and polling.
 
 Applications today integrate their own AI assistants. We explore a different
 future: users bring the same persistent personal agent with them across

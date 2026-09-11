@@ -1,6 +1,8 @@
 # Ruth shopping demo
 
-Status: proposed demo design; this document does not implement the integration.
+Status: the initial polling-based prototype is implemented. This document keeps
+the original design rationale; see [running the prototype](shopping-demo.md)
+for the current code, setup, exact contract and limitations.
 
 The user starts shopping with `/shop` in Telegram. Ruth searches two registered
 applications, sends recommendations to Telegram, and continues the same

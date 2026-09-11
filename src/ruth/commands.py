@@ -1011,6 +1011,8 @@ def _evolve_help_usage(prefix: str) -> str:
 
 CORE_COMMANDS = (
     CoreCommand("help", "help", "", "", "show this command list", _help_usage),
+    CoreCommand("shop", "shop", "Common", "<request>|status|cancel",
+                "shop with Ruth across connected applications"),
     CoreCommand(
         "start",
         "start",

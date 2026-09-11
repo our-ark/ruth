@@ -1,0 +1,4 @@
+[
+  {"id":"day-one","name":"Day One / Ink","price_cents":9800,"currency":"USD","sizes":["8","9","10","11"],"color":"Ink","description":"A roomy toe box and a soft footbed for everyday walks. Flexible knit upper; relaxed workday styling.","fit":"roomy","cushioning":"soft","tags":["sneakers","shoes","work","walking","comfort"],"image":"/shoe.png"},
+  {"id":"day-one-lite","name":"Day One Lite / Ink","price_cents":7800,"currency":"USD","sizes":["8","9","10"],"color":"Ink","description":"The lighter Day One option. A standard toe box and a firmer, thinner footbed for shorter walks.","fit":"standard","cushioning":"firm","tags":["sneakers","shoes","work","walking","lightweight"],"image":"/shoe.png"}
+]
