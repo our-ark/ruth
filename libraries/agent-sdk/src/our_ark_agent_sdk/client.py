@@ -60,6 +60,8 @@ class AppClient:
                 detail = json.loads(error.read(2000)).get("error", "Request rejected")
             except (ValueError, TypeError, AttributeError):
                 detail = "Request rejected"
+            finally:
+                error.close()
             raise self.error_type(f"{self.name}: {detail} (HTTP {error.code})",
                                   retryable=error.code >= 500 or error.code == 429) from None
         except (URLError, TimeoutError, OSError, ValueError) as error:
