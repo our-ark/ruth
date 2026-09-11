@@ -13,7 +13,10 @@ All source is in this repository. No external demo checkout is needed.
 
 The two stores have separate HTTP origins, catalogs, account credentials,
 session histories and SQLite files. They import the same `/sdk/agent-chat.js`
-and CSS. `variant="sidebar"` and `variant="dock"` change the presentation.
+and CSS. Both stores use `variant="sidebar"` to keep Ruth on the right on desktop,
+with `app-name` labels identifying **Ruth on DAYFORM** and **Ruth on STRIDE**.
+STRIDE uses `theme="dark"` to match its storefront; the shared avatar and continuing
+conversation remain recognizable. On narrow screens the chat stacks below the products.
 Neither store imports Ruth or calls a public agent endpoint.
 
 ## Local walkthrough with the real model

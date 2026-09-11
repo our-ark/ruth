@@ -16,6 +16,11 @@ export class AgentChat extends HTMLElement {
           <textarea id="agent-input" name="message" rows="2" maxlength="8000" placeholder="Ask Ruth about this pair…" required></textarea>
           <button type="submit" aria-label="Send message to Ruth">Send</button></div>
         <p class="agent-error" role="alert"></p></form></section>`;
+    const appName = this.getAttribute("app-name");
+    if (appName) {
+      this.querySelector(".agent-header strong").textContent = `Ruth on ${appName}`;
+      this.querySelector(".agent-panel").setAttribute("aria-label", `Conversation with Ruth on ${appName}`);
+    }
     this.form = this.querySelector("form");
     this.input = this.querySelector("textarea");
     this.messages = this.querySelector(".agent-messages");
