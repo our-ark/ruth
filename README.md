@@ -16,7 +16,7 @@ governs their collaboration.
 The local shopping prototype connects two mock stores through the shared
 UAAP App SDK. `/shop` brings them into Ruth's existing conversation and model
 runtime. Start with the [UAAP protocol](protocol/README.md),
-[App SDK](libraries/app-sdk/README.md), or
+[two SDKs](libraries/README.md), or
 [runnable walkthrough](docs/shopping-demo.md).
 
 ## UAAP in this repository
@@ -27,13 +27,16 @@ contracts; **Ruth** demonstrates them as a persistent personal agent.
 | Location | Role |
 | --- | --- |
 | [`protocol/`](protocol/README.md) | UAAP working draft: roles, message/context semantics, and the current HTTP mapping |
-| [`libraries/app-sdk/`](libraries/app-sdk/README.md) | UAAP App SDK: app-hosted reference adapter and shared browser chat component |
+| [`libraries/agent-sdk/`](libraries/agent-sdk/README.md) | UAAP Agent SDK: outbound app connections, event reads, and reply delivery |
+| [`libraries/app-sdk/`](libraries/app-sdk/README.md) | UAAP App SDK: backend message/context storage and app-hosted APIs |
 | [`src/ruth/shopping/`](src/ruth/shopping) | Ruth's UAAP integration, task lifecycle, and shopping orchestration |
 | [`examples/shopping/`](examples/shopping/README.md) | DAYFORM and STRIDE: two participating apps with different storefronts |
 
-UAAP's contracts are independent of Ruth's model and runtime. The current SDK
-implements a local shopping example; its product context and preference fields
-are specific to that example. Product search and ordering use ordinary app APIs.
+Both SDKs are independent of Ruth's model and runtime. Applications choose
+their own UI; the shared shopping chat component is an
+[optional example](examples/shopping/agent-ui.md). The app SDK provides a
+generic message/context store and the existing shopping adapter. Product
+search and ordering use ordinary app APIs.
 
 ## Mission
 
@@ -91,8 +94,8 @@ carries its page/product snapshot, and each answer goes back to its source
 session. Ordinary product APIs support search, details and simulated orders.
 No dynamic user tracking or public inbound Ruth endpoint is required.
 
-All code is in this repository: `libraries/app-sdk`, `examples/shopping`, and
-`src/ruth/shopping`. The SDK is independent of Ruth's runtime. Try the local
+All code is in this repository: `libraries/agent-sdk`, `libraries/app-sdk`,
+`examples/shopping`, and `src/ruth/shopping`. Try the local
 stores and real-model console in two terminals:
 
 ```bash

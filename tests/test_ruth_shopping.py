@@ -130,7 +130,7 @@ class ShoppingIntegrationTests(unittest.TestCase):
         dropped = []
         def effect(fn, *a, **kw):
             result = fn(*a, **kw)
-            if a and str(a[0]).endswith("/outputs") and not dropped:
+            if getattr(fn, "__name__", "") == "output" and not dropped:
                 dropped.append(True)
                 raise ShoppingError("simulated connection loss after commit", retryable=True)
             return result

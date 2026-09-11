@@ -112,12 +112,18 @@ they do not guarantee that model reasoning executes exactly once after a crash.
 
 ## Application UI and domain APIs
 
+The two [UAAP SDKs](../libraries/README.md) implement the agent and application
+sides of these contracts. The agent SDK needs no frontend. The app SDK's
+`MessageStore` accepts domain-specific JSON context, while `AppServer` can run
+headlessly with only agent-facing HTTP endpoints. The `CollaborationStore`
+shopping specialization supplies the product and preference fields listed above.
+
 The shared `<agent-chat>` component is one UI implementation. Both demo stores
 use it with their own styling and app label. Its same-origin `/ui/*` routes
 connect the browser to the application's backend with a separate cookie
 credential; the agent bearer token is never exposed to the browser.
 
-UAAP does not require a uniform chat layout. The supplied component currently
+UAAP does not require this component or a uniform chat layout. The supplied component currently
 uses Ruth's name and shopping-specific copy. Another integration can use its
 own UI while preserving the message and context semantics.
 
@@ -146,7 +152,10 @@ or payloads. There is no protocol-version negotiation in this prototype.
 
 ## Implementation and walkthrough
 
-- [UAAP App SDK](../libraries/app-sdk/README.md): app adapter and browser component.
-- [Ruth integration](../src/ruth/shopping): outbound client, task lifecycle, and shared conversation orchestration.
+- [SDK overview](../libraries/README.md): agent-side and application-side responsibilities, with replaceable UI.
+- [UAAP Agent SDK](../libraries/agent-sdk/README.md): independent outbound app client, event reads, and reply delivery.
+- [UAAP App SDK](../libraries/app-sdk/README.md): UI-independent message/context storage and reference HTTP adapter; includes a shopping specialization.
+- [Ruth integration](../src/ruth/shopping): uses the agent SDK while retaining task lifecycle and shared conversation orchestration.
+- [Optional demo UI](../examples/shopping/agent-ui.md): the existing shopping chat component, independent of the protocol requirements.
 - [Participating applications](../examples/shopping/README.md): DAYFORM and STRIDE.
 - [Runnable demo and verification](../docs/shopping-demo.md): console/Telegram setup and existing integration checks.

@@ -3,22 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
-from urllib.error import HTTPError, URLError
+from urllib.error import URLError
 from urllib.parse import quote, urlencode, urljoin, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request, build_opener
 
 from ruth.paths import private_state_path
+from ruth.runtime_dependencies import activate_runtime_dependencies
+
+activate_runtime_dependencies()
+from our_ark_agent_sdk import AppClient, NoRedirect, UAAPError
 
 
-class ShoppingError(RuntimeError):
-    def __init__(self, message, *, retryable=False):
-        super().__init__(message)
-        self.retryable = retryable
-
-
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, *_args, **_kwargs):
-        return None  # Never forward account credentials to a redirected host.
+class ShoppingError(UAAPError):
+    """Ruth-specific error type retained around the reusable UAAP client."""
 
 
 def registry_path(root: Path) -> Path:
@@ -26,32 +23,9 @@ def registry_path(root: Path) -> Path:
 
 
 @dataclass(frozen=True)
-class AppConnection:
-    app_id: str
-    name: str
-    base_url: str
-    token: str = field(repr=False)
+class AppConnection(AppClient):
     connect_token: str = field(repr=False)
-
-    def request(self, path: str, body=None):
-        data = json.dumps(body).encode() if body is not None else None
-        request = Request(self.base_url + path, data=data,
-                          headers={"Authorization": "Bearer " + self.token,
-                                   "Content-Type": "application/json"})
-        try:
-            with build_opener(NoRedirect()).open(request, timeout=5) as response:
-                raw = response.read(1_000_001)
-                if len(raw) > 1_000_000:
-                    raise ShoppingError(f"{self.name} returned too much data")
-                return json.loads(raw)
-        except HTTPError as error:
-            try:
-                detail = json.loads(error.read(2000)).get("error", "Request rejected")
-            except (ValueError, TypeError):
-                detail = "Request rejected"
-            raise ShoppingError(f"{self.name}: {detail} (HTTP {error.code})", retryable=error.code >= 500 or error.code == 429) from None
-        except (URLError, TimeoutError, OSError, ValueError) as error:
-            raise ShoppingError(f"{self.name} is unavailable ({type(error).__name__}); retry later", retryable=True) from None
+    error_type = ShoppingError
 
     def products(self, **filters):
         return self.request("/products?" + urlencode(filters))["products"]

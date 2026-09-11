@@ -30,7 +30,7 @@ def prepare(root, host="127.0.0.1", ports=(8011, 8012)):
 
 
 def servers(root, host="127.0.0.1", ports=(8011, 8012)):
-    # Only the demo runner needs the SDK; Ruth's agent client has no SDK dependency.
+    # App SDK serves the stores; Ruth uses the separate agent SDK for outbound calls.
     sys.path.insert(0, str(SOURCE / "libraries" / "app-sdk" / "src"))
     from our_ark_app_sdk import AppServer, CollaborationStore
 

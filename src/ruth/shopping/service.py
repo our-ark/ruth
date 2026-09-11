@@ -202,7 +202,7 @@ class ShoppingService:
             for app_id, app in self.apps.items():
                 try:
                     after = state["cursors"].get(app_id, 0)
-                    batch = self.effect(app.request, f"/collaboration/events?after={after}")
+                    batch = self.effect(app.events, after)
                     for event in batch["events"]:
                         if not isinstance(event.get("cursor"), int) or event["cursor"] <= after:
                             raise ShoppingError(f"{app.name} returned an invalid cursor")
@@ -243,7 +243,7 @@ class ShoppingService:
             self.save(state)  # Persist before any external output.
         output = receipt["output"]
         if not receipt.get("delivered"):
-            self.effect(app.request, f"/collaboration/sessions/{event['session_id']}/outputs", output)
+            self.effect(app.output, event["session_id"], output)
             receipt["delivered"] = True
             self.save(state)
         if receipt.get("order") and not receipt.get("notified"):

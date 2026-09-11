@@ -6,7 +6,6 @@ This loopback demo adapter is not a production identity or payment service.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -15,56 +14,21 @@ from pathlib import Path
 import re
 import secrets
 from socketserver import TCPServer
-import sqlite3
-import time
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 
-class APIError(Exception):
-    def __init__(self, status: int, message: str):
-        self.status, self.message = status, message
+from .store import APIError, MessageStore, identifier
 
 
-def identifier(value):
-    if not isinstance(value, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", value):
-        raise APIError(400, "Invalid identifier")
-    return value
+class CollaborationStore(MessageStore):
+    """Shopping-specific reference adapter retained for the demo applications."""
 
-
-def bounded_text(value, maximum=8000):
-    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
-        raise APIError(400, "Missing or oversized text")
-    return value.strip()
-
-
-class CollaborationStore:
     def __init__(self, path: Path, app_id: str, catalog: list[dict]):
-        self.path, self.app_id = Path(path), identifier(app_id)
+        super().__init__(path, app_id)
         self.catalog = {identifier(p["id"]): p for p in catalog}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.transaction() as db:
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, owner TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS events(
-                    cursor INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-                    session TEXT NOT NULL, body TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS outputs(
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-                    session TEXT NOT NULL, body TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS orders(key TEXT PRIMARY KEY, request TEXT NOT NULL, body TEXT NOT NULL);
-            """)
-        self.path.chmod(0o600)
-
-    @contextmanager
-    def transaction(self):
-        db = sqlite3.connect(self.path, timeout=5)
-        db.row_factory = sqlite3.Row
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
+            db.execute("CREATE TABLE IF NOT EXISTS orders(key TEXT PRIMARY KEY, request TEXT NOT NULL, body TEXT NOT NULL)")
 
     def product(self, product_id):
         if product_id not in self.catalog:
@@ -86,85 +50,23 @@ class CollaborationStore:
                 if all(w in json.dumps(p).lower() for w in words)
                 and p["price_cents"] <= budget and (not size or size in p["sizes"])]
 
-    def session(self, owner):
-        session_id = uuid4().hex
-        with self.transaction() as db:
-            db.execute("INSERT INTO sessions VALUES (?, ?)", (session_id, owner))
-        return {"session_id": session_id, "app_id": self.app_id}
-
-    def require_session(self, db, session_id, owner=None):
-        row = db.execute("SELECT owner FROM sessions WHERE id=?", (session_id,)).fetchone()
-        if not row or (owner is not None and row["owner"] != owner):
-            raise APIError(404, "Session not found")
-
-    def message(self, owner, body):
-        session_id, message_id = identifier(body.get("session_id")), identifier(body.get("id"))
-        text = bounded_text(body.get("text"))
-        context = body.get("context")
-        if not isinstance(context, dict):
-            raise APIError(400, "A context snapshot is required")
+    def snapshot_context(self, context):
+        context = super().snapshot_context(context)
         product = self.product(identifier(context.get("product_id")))
         size = context.get("selected_size", "")
         if size and size not in product["sizes"]:
             raise APIError(400, "Selected size is unavailable")
-        snapshot = {"revision": identifier(context.get("revision")), "page_type": "product",
-                    "product_id": product["id"], "selected_size": size,
-                    "product": product}
-        event = {"event_id": message_id, "session_id": session_id,
-                 "message": {"id": message_id, "text": text}, "context": snapshot,
-                 "share_preferences": body.get("share_preferences") is True}
-        with self.transaction() as db:
-            self.require_session(db, session_id, owner)
-            old = db.execute("SELECT body FROM events WHERE id=?", (message_id,)).fetchone()
-            if old:
-                saved = json.loads(old["body"])
-                if any(saved[k] != event[k] for k in event):
-                    raise APIError(409, "Message id reused with different content")
-                return saved
-            event["created_at"] = time.time()
-            db.execute("INSERT INTO events(id, session, body) VALUES (?, ?, ?)",
-                       (message_id, session_id, json.dumps(event)))
-        return event
+        return {"revision": identifier(context.get("revision")), "page_type": "product",
+                "product_id": product["id"], "selected_size": size, "product": product}
 
-    def events(self, after):
-        with self.transaction() as db:
-            rows = db.execute("SELECT cursor, body FROM events WHERE cursor>? ORDER BY cursor LIMIT 20", (after,)).fetchall()
-        events = [dict(json.loads(r["body"]), cursor=r["cursor"]) for r in rows]
-        return {"events": events, "cursor": rows[-1]["cursor"] if rows else after}
+    def message_metadata(self, body):
+        return {"share_preferences": body.get("share_preferences") is True}
 
-    def output(self, session_id, body):
-        identifier(body.get("id"))
-        identifier(body.get("in_reply_to"))
-        bounded_text(body.get("text"), 24000)
-        shared = body.get("shared_context", {})
-        if not isinstance(shared, dict) or set(shared) - {"budget_cents", "size", "purpose"}:
+    def validate_shared_context(self, source, shared):
+        if set(shared) - {"budget_cents", "size", "purpose"}:
             raise APIError(400, "Unsupported shared context")
-        if len(json.dumps(body)) > 32000:
-            raise APIError(400, "Output too large")
-        with self.transaction() as db:
-            self.require_session(db, session_id)
-            source = db.execute("SELECT body FROM events WHERE id=? AND session=?",
-                                (body["in_reply_to"], session_id)).fetchone()
-            if not source:
-                raise APIError(400, "Reply does not belong to this session")
-            if shared and not json.loads(source["body"])["share_preferences"]:
-                raise APIError(403, "This message did not authorize preference disclosure")
-            old = db.execute("SELECT session, body FROM outputs WHERE id=?", (body["id"],)).fetchone()
-            encoded = json.dumps(body, sort_keys=True)
-            if old:
-                if old["session"] != session_id or old["body"] != encoded:
-                    raise APIError(409, "Output id reused with different content")
-            else:
-                db.execute("INSERT INTO outputs(id, session, body) VALUES (?, ?, ?)",
-                           (body["id"], session_id, encoded))
-        return body
-
-    def transcript(self, owner, session_id):
-        with self.transaction() as db:
-            self.require_session(db, session_id, owner)
-            messages = [json.loads(r[0]) for r in db.execute("SELECT body FROM events WHERE session=? ORDER BY cursor", (session_id,))]
-            outputs = [json.loads(r[0]) for r in db.execute("SELECT body FROM outputs WHERE session=? ORDER BY seq", (session_id,))]
-        return {"messages": messages, "outputs": outputs}
+        if shared and not source.get("share_preferences"):
+            raise APIError(403, "This message did not authorize preference disclosure")
 
     def order(self, body):
         key = identifier(body.get("idempotency_key"))
@@ -200,9 +102,9 @@ class AppServer(ThreadingHTTPServer):
         TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
-    def __init__(self, address, *, store, agent_token, connect_token, static_dir, public_origin, static_files=None):
+    def __init__(self, address, *, store, agent_token, public_origin, connect_token=None, static_dir=None, static_files=None):
         self.store, self.agent_token, self.connect_token = store, agent_token, connect_token
-        self.static_dir = Path(static_dir).resolve()
+        self.static_dir = Path(static_dir).resolve() if static_dir is not None else None
         self.static_files = static_files or {}
         self.public_origin = public_origin.rstrip("/")
         self.cookie_name = "ark_" + store.app_id
@@ -243,12 +145,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 if not secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + self.server.agent_token):
                     raise APIError(401, "Agent account credential required")
             if path.startswith("/ui/"):
+                if not self.server.connect_token:
+                    raise APIError(404, "Browser adapter is not enabled")
                 if method == "POST" and self.headers.get("Origin") != self.server.public_origin:
                     raise APIError(403, "Same-origin browser request required")
                 if path == "/ui/connect" and method == "POST":
                     token = body.get("token", "")
                     if not isinstance(token, str) or not secrets.compare_digest(token, self.server.connect_token):
-                        raise APIError(401, "Open a store link from Ruth to connect")
+                        raise APIError(401, "Open an authorized app link to connect")
                     cookie = f"{self.server.cookie_name}={self.server.browser_token}; HttpOnly; SameSite=Strict; Path=/"
                     if self.server.public_origin.startswith("https:"):
                         cookie += "; Secure"
@@ -256,13 +160,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 cookies = SimpleCookie(self.headers.get("Cookie", ""))
                 cookie = cookies.get(self.server.cookie_name)
                 if not cookie or not secrets.compare_digest(cookie.value, self.server.browser_token):
-                    raise APIError(401, "Open a store link from Ruth to connect")
+                    raise APIError(401, "Open an authorized app link to connect")
             store = self.server.store
             if method == "GET" and path == "/health":
-                return self.send_json({"app_id": store.app_id, "protocol": "our-ark-app/0.1", "simulated": True})
-            if method == "GET" and path == "/products":
+                return self.send_json({"app_id": store.app_id, "protocol": "our-ark-app/0.1", "simulated": isinstance(store, CollaborationStore)})
+            if method == "GET" and path == "/products" and isinstance(store, CollaborationStore):
                 return self.send_json({"products": store.products(query)})
-            if method == "GET" and path.startswith("/products/"):
+            if method == "GET" and path.startswith("/products/") and isinstance(store, CollaborationStore):
                 return self.send_json(store.product(path.removeprefix("/products/")))
             if method == "GET" and path == "/collaboration/events":
                 after = int(query.get("after", ["0"])[0])
@@ -272,7 +176,7 @@ class AppHandler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/collaboration/sessions/([a-zA-Z0-9_-]+)/outputs", path)
             if method == "POST" and match:
                 return self.send_json(store.output(match[1], body))
-            if method == "POST" and path == "/orders":
+            if method == "POST" and path == "/orders" and isinstance(store, CollaborationStore):
                 return self.send_json(store.order(body))
             if method == "POST" and path == "/ui/sessions":
                 return self.send_json(store.session("demo-account"))
@@ -307,6 +211,8 @@ class AppHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def static(self, path):
+        if self.server.static_dir is None:
+            raise APIError(404, "Static UI is not enabled")
         if path in self.server.static_files:
             file = Path(self.server.static_files[path])
             return self.send_bytes(file.read_bytes(), mimetypes.guess_type(file.name)[0] or "application/octet-stream")

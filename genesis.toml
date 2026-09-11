@@ -18,6 +18,12 @@ body_paths = [
 validation = ["-m", "unittest", "discover", "-s", "tests", "-t", "."]
 
 [[runtime_dependencies]]
+name = "uaap-agent-sdk"
+requirement = "our-ark-agent-sdk @ git+https://github.com/our-ark/ruth.git@be545142df14a08851efc46dec024cc19af1ed85#subdirectory=libraries/agent-sdk"
+import_name = "our_ark_agent_sdk"
+local_source = "libraries/agent-sdk/src"
+
+[[runtime_dependencies]]
 name = "provider-kit"
 requirement = "our-ark-provider-kit @ git+https://github.com/our-ark/enoch.git@ac776973f53fd8638da7e7bee59d139480cdf48f#subdirectory=libraries/provider-kit"
 import_name = "our_ark_provider_kit"

@@ -8,11 +8,12 @@ All source is in this repository. No external demo checkout is needed.
 | Location | Responsibility |
 | --- | --- |
 | `protocol` | UAAP working draft and current HTTP mapping |
-| `libraries/app-sdk` | UAAP App SDK: independent Python app adapter, durable message/context store, shared browser chat component |
+| `libraries/agent-sdk` | UAAP Agent SDK: runtime-independent outbound app connections and message/context delivery |
+| `libraries/app-sdk` | UAAP App SDK: generic message/context store, headless HTTP adapter, and shopping specialization |
 | `examples/shopping/dayform` | Warm DAYFORM storefront and mock catalog |
 | `examples/shopping/stride` | Dark STRIDE STUDIO storefront and mock catalog |
 | `examples/shopping/store.js` | Shared product-page controller (served by both apps) |
-| `src/ruth/shopping` | Outbound app client, registry, tool orchestration, durable replies and task lifecycle |
+| `src/ruth/shopping` | Agent SDK integration, registry, shopping APIs, tool orchestration, durable replies and task lifecycle |
 | `src/ruth/app/core.py` | `/shop`, existing runtime session, serialized Telegram/app turns, Telegram outbox |
 
 The two stores have separate HTTP origins, catalogs, account credentials,
@@ -22,6 +23,8 @@ with `app-name` labels identifying **Ruth on DAYFORM** and **Ruth on STRIDE**.
 STRIDE uses `theme="dark"` to match its storefront; the shared avatar and continuing
 conversation remain recognizable. On narrow screens the chat stacks below the products.
 Neither store imports Ruth or calls a public agent endpoint.
+The shared chat widget is an [optional example UI](../examples/shopping/agent-ui.md);
+applications can use the app SDK's backend with their own frontend.
 
 ## Local walkthrough with the real model
 
@@ -203,6 +206,7 @@ model turn; output/order idempotency protects the corresponding demo effects.
 
 ```bash
 python3.13 -m unittest tests.test_ruth_shopping -v
+python3.13 -m unittest tests.test_uaap_sdk -v
 python3.13 -m unittest tests.test_ruth_shopping_photos -q
 node tests/test_shopping_order_ui.cjs
 python3.13 -m unittest tests.test_ruth_telegram tests.test_ruth_brain tests.test_ruth_application tests.test_ruth_command_registry -q
