@@ -79,7 +79,9 @@ Telegram's long poll is waiting; a shared lock serializes reasoning turns.
 Telegram recommendations appear as one photo album with one shared caption,
 using [Telegram sendMediaGroup](https://core.telegram.org/bots/api#sendmediagroup).
 The caption numbers products in photo order, with each store/product name, price,
-total including mock tax, and a clickable connected product link. A short opening
+total including mock tax, and the full clickable product URL, including its
+connection fragment. URLs appear as visible text rather than hidden text links.
+A short opening
 recommendation is included within Telegram's caption limit. The full reply stays
 in Ruth's conversation; successful albums do not generate a separate text message.
 
@@ -98,7 +100,7 @@ local demo images do not need a public image host. PNG/JPEG images are limited t
 cross-origin images and redirects are not followed, and image requests carry no
 account credentials. The shared provider's text-only interface remains unchanged.
 
-An unavailable image or failed/ambiguous album upload falls back to the full text
+An unavailable image, URLs exceeding the caption limit, or failed/ambiguous album upload falls back to the full text
 recommendation with links. A per-turn album receipt prevents duplicate attempts
 on event replay or restart. An ambiguous upload is not retried automatically, so
 an uncertain outcome can yield an album plus fallback text, but no repeated album.

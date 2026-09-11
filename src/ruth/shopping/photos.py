@@ -33,17 +33,20 @@ def _clip(text, limit):
 
 
 def recommendation_caption(cards, intro=""):
-    """One album caption; photo order matches numbered, linked product entries."""
+    """One album caption with visible URLs, not Telegram's hidden text links."""
     heading = f"{len(cards)} shopping option" + ("s" if len(cards) != 1 else "")
     html, visible = [], []
     for number, card in enumerate(cards, 1):
         title = f"{number}. {_clip(card['app_name'], 24)} · {_clip(card['name'], 40)}"
         price = f"${card['price_cents'] / 100:.2f} · ${card['total_cents'] / 100:.2f} total"
-        label = f"Open option {number}"
-        html.append(f'<b>{escape(title)}</b>\n{price}\n<a href="{escape(card["link"], quote=True)}">{label}</a>')
-        visible.append(f"{title}\n{price}\n{label}")
+        link = card["link"]
+        html.append(f"<b>{escape(title)}</b>\n{price}\n{escape(link)}")
+        visible.append(f"{title}\n{price}\n{link}")
     footer = "Totals include mock tax; shipping included."
     base = heading + "\n\n" + "\n\n".join(visible) + "\n\n" + footer
+    if _units(base) > 1024:
+        # Keep connection URLs intact; the caller can send the full text reply.
+        raise ShoppingError("Recommendation links exceed the photo caption limit")
     room = min(320, 1024 - _units(base) - 2)
     summary = _clip(intro.strip(), room) if intro and room > 1 else ""
     return (f"<b>{heading}</b>\n\n" + (escape(summary) + "\n\n" if summary else "")

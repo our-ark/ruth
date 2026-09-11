@@ -22,7 +22,7 @@ class ShoppingPhotoTransportTests(unittest.TestCase):
             order_caption(text + "😀" * 600)
 
     def upload(self, photos, result):
-        caption = '<b>Options</b>\n<a href="http://127.0.0.1:8011/?product=day-one#connect=demo">Open option 1</a>'
+        caption = '<b>Options</b>\nhttp://127.0.0.1:8011/?product=day-one#connect=demo'
         with patch("ruth.shopping.photos.build_opener") as factory:
             opener = factory.return_value
             opener.open.return_value.__enter__.return_value = BytesIO(json.dumps({"ok": True, "result": result}).encode())
@@ -89,16 +89,24 @@ class ShoppingPhotoTransportTests(unittest.TestCase):
                     self.links.append(dict(attrs)["href"])
         cards = [{"app_name": "Store <&> " + "😀" * 50, "name": "Shoe " + "😀" * 80,
                   "price_cents": 9800, "total_cents": 10780,
-                  "link": f"https://example.com/?product={i}&color=ink#connect=" + "x" * 2000}
-                 for i in range(6)]
+                  "link": f"https://example.com/?product={i}&color=ink#connect=" + "x" * 43}
+                 for i in range(3)]
         parsed = Caption()
         parsed.feed(recommendation_caption(cards, "My preferred option is the first. " * 100))
-        self.assertEqual(parsed.links, [card["link"] for card in cards])
+        self.assertEqual(parsed.links, [], "URLs must be visible text, not hidden hyperlink entities")
         visible = "".join(parsed.visible)
         self.assertLessEqual(len(visible.encode("utf-16-le")) // 2, 1024)
-        for i in range(1, 7):
-            self.assertIn(f"Open option {i}", visible)
+        for number, card in enumerate(cards, 1):
+            self.assertIn(card["link"], visible, "preserve the full URL including account connection fragment")
+            self.assertIn(f"{number}. Store <&>", visible)
+        self.assertNotIn("Open option", visible)
         self.assertIn("$107.80 total", visible)
+
+    def test_oversized_visible_urls_use_text_fallback_without_truncating_links(self):
+        card = {"app_name": "Store", "name": "Shoe", "price_cents": 7800,
+                "total_cents": 8580, "link": "https://example.com/#connect=" + "x" * 2000}
+        with self.assertRaisesRegex(ShoppingError, "caption limit"):
+            recommendation_caption([card])
 
 
 if __name__ == "__main__":
