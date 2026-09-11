@@ -34,8 +34,8 @@ without conversation deletion. The command-dispatch check enters through
 `RuthApplication.handle_event` with a Telegram-compatible test provider.
 
 The inherited Telegram, runtime, application, command registry, daemon,
-authorization and effect tests provide regression coverage. Live Telegram
-delivery and remote/phone access still require configured deployment testing.
+authorization and effect tests provide regression coverage. Remote/phone access
+still requires configured deployment testing.
 
 ## Telegram recommendation photos
 
@@ -45,3 +45,9 @@ upload, catalog-derived captions, source-app image restrictions, failed-image
 fallback, and photo deduplication after event replay/restart. The command-dispatch
 test verifies that text precedes photos and that app replies stay in the app.
 The automated Telegram transport is mocked; it does not establish live delivery.
+
+After deployment to a configured local Ruth instance, a real Telegram shopping
+turn produced three product photo messages (Day One, Arc 01 and Day One Lite).
+All three uploads returned Telegram message IDs and were recorded as delivered;
+re-invoking delivery for that same turn sent no duplicate photos. This checks
+live photo delivery for the demo catalogs, not remote access to the local stores.
