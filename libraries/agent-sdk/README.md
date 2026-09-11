@@ -9,7 +9,7 @@ python3 -m pip install -e libraries/agent-sdk
 ```
 
 ```python
-from our_ark_agent_sdk import AppClient
+from our_ark_agent_sdk import AgentOutput, AppClient
 
 app = AppClient(
     app_id="notes", name="My Notes",
@@ -17,22 +17,73 @@ app = AppClient(
 )
 batch = app.events(after=saved_cursor)
 for event in batch["events"]:
-    # The agent supplies its own model, continuing memory, and disclosure policy.
-    # Persist the output before delivery; reuse it if delivery must be retried.
-    output = load_or_create_durable_reply(app.app_id, event)
+    # App -> agent: local context captured with this user message.
+    app_context = event["context"]
+    user_message = event["message"]["text"]
+
+    output = load_saved_reply(app.app_id, event["event_id"])
+    if output is None:
+        # The agent combines app_context with its own continuing conversation.
+        reply_text = respond(user_message, app_context)
+        # Agent -> app: select only user context authorized for this destination.
+        user_context = authorized_context_for_app(app.app_id, event)
+        output: AgentOutput = {
+            "id": new_reply_id(),
+            "in_reply_to": event["message"]["id"],
+            "text": reply_text,
+            "shared_context": user_context,
+        }
+        save_reply(app.app_id, event["event_id"], output)
+    # A retry reuses the saved text, shared context, and IDs.
     app.output(event["session_id"], output)
     save_cursor(app.app_id, event["cursor"])
 ```
 
-`load_or_create_durable_reply` and `save_cursor` above are integration functions
-supplied by the agent. An output contains `id`, `in_reply_to`, `text`, and optional
-authorized `shared_context`; see the [protocol](../../protocol/README.md).
+The reply-storage, reasoning, ID, authorization, and cursor functions above are
+integration hooks supplied by the agent. They are not SDK functions. The complete
+context round trip is exercised by the [headless notes-app test](../../tests/test_uaap_sdk.py).
+
+## Context exchange
+
+Context exchange currently travels in the same envelopes as message delivery:
+
+| Direction | SDK method and field | Example |
+| --- | --- | --- |
+| App -> personal agent | `events()` returns `AppEvent.context` | Selected paragraph, product details, or current page state captured with the message. |
+| Personal agent -> app | `output()` sends `AgentOutput.shared_context` | A language preference or shopping budget authorized for this app. |
+
+For a notes app that supports language disclosure, an authorized output could be:
+
+```python
+output: AgentOutput = {
+    "id": "reply-001",
+    "in_reply_to": "msg-001",
+    "text": "Here is the explanation in English.",
+    "shared_context": {"language": "en"},
+}
+app.output(source_session_id, output)
+```
+
+The SDK preserves domain fields and checks that incoming `context` and outgoing
+`shared_context` are objects. These shape checks do not authorize disclosure.
+The agent selects allowed user context; the app checks its own per-message
+policy. An empty `{}` shares no structured user context. The SDK does not copy
+incoming app context or the agent's full memory into `shared_context` automatically.
+
+`AppEvent`, `EventBatch`, `UserMessage`, and `AgentOutput` are exported `TypedDict`
+envelopes. They document the core fields while app adapters may add metadata,
+such as the shopping demo's `share_preferences` permission.
+
+This version has no standalone `get_context`/`set_context` endpoint or context-only
+event. App context arrives with a user message, and user context returns with an
+agent reply. Independent context updates would require an extension on both
+SDKs and the app-hosted protocol. See the [protocol](../../protocol/README.md).
 
 ## Responsibilities
 
 - `AppClient`: one app origin and account credential; outbound JSON requests.
-- `events(after)`: a finite polling batch with app-local cursor validation.
-- `output(session_id, body)`: reply delivery to the originating app session.
+- `events(after)`: receive user messages with app context; validate app-local cursors and context shape.
+- `output(session_id, body)`: deliver replies with optional authorized user context to the originating app session.
 - `UAAPError.retryable`: distinguishes transient HTTP/transport failures from
   permanent rejections. Redirects are not followed and credentials are hidden
   from the client's representation. HTTPS is required outside loopback.

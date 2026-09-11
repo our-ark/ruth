@@ -9,6 +9,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from .types import AgentOutput, EventBatch
+
 
 class UAAPError(RuntimeError):
     def __init__(self, message, *, retryable=False):
@@ -68,8 +70,13 @@ class AppClient:
             raise self.error_type(f"{self.name} is unavailable ({type(error).__name__}); retry later",
                                   retryable=True) from None
 
-    def events(self, after=0):
-        """Read a finite event batch without acknowledging or advancing a cursor."""
+    def events(self, after=0) -> EventBatch:
+        """Receive messages and app context without advancing a saved cursor.
+
+        Each event's ``context`` is the app-provided snapshot captured for that
+        message. It is untrusted domain data, not current presence or permission
+        to access unrelated user memory. Domain-specific fields are preserved.
+        """
         if type(after) is not int or after < 0:
             raise ValueError("after must be a non-negative integer")
         batch = self.request(f"/collaboration/events?after={after}")
@@ -80,15 +87,25 @@ class AppClient:
             if (not isinstance(event, dict) or type(event.get("cursor")) is not int
                     or event["cursor"] <= cursor):
                 raise self.error_type(f"{self.name} returned an invalid cursor")
+            if not isinstance(event.get("context"), dict):
+                raise self.error_type(f"{self.name} returned an invalid app context snapshot")
             cursor = event["cursor"]
         if type(batch.get("cursor")) is not int or batch["cursor"] != cursor:
             raise self.error_type(f"{self.name} returned an invalid batch cursor")
         return batch
 
-    def output(self, session_id, body):
-        """Deliver an output containing a stable id and in_reply_to message ID."""
+    def output(self, session_id: str, body: AgentOutput) -> AgentOutput:
+        """Deliver a reply and optional authorized user context to its source app.
+
+        ``shared_context`` carries selected structured user context for the app;
+        omit it or send {} when sharing nothing. The agent must authorize these
+        fields before calling, and the app applies its own disclosure policy.
+        Persist the whole output, including context and stable IDs, for retries.
+        """
         if not isinstance(session_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", session_id):
             raise ValueError("Invalid session identifier")
         if not isinstance(body, dict):
             raise ValueError("Expected an output object")
+        if not isinstance(body.get("shared_context", {}), dict):
+            raise ValueError("shared_context must be an object")
         return self.request(f"/collaboration/sessions/{session_id}/outputs", body)
