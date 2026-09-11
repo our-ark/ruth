@@ -33,8 +33,9 @@ class ReasoningFixture:
             return json.dumps({"reply": "Your mock order is ready."})
         turn = payload["turn"]
         if "place a simulated order" in turn["message"]["text"]:
-            return json.dumps({"tool": "orderProduct", "app_id": turn["source"],
-                               "arguments": {"product_id": turn["context"]["product_id"],
+            telegram = turn["source"] == "telegram"
+            return json.dumps({"tool": "orderProduct", "app_id": "dayform" if telegram else turn["source"],
+                               "arguments": {"product_id": "day-one-lite" if telegram else turn["context"]["product_id"],
                                              "size": "9", "quantity": 1, "max_total_cents": 12000}})
         if turn["source"] == "telegram":
             return json.dumps({"reply": "Two options for your workday.", "recommendations": [
@@ -69,12 +70,12 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.brain, self.notifications, self.records = ReasoningFixture(), [], []
         self.service = self.new_service()
 
-    def new_service(self, effect=lambda fn, *a, **kw: fn(*a, **kw), notify=None):
+    def new_service(self, effect=lambda fn, *a, **kw: fn(*a, **kw), notify=None, send_photos=None):
         def sent(chat, message, key):
             self.notifications.append((chat, message, key))
             return True
         return ShoppingService(self.root, apps=self.apps, respond=self.brain, notify=notify or sent,
-                               record=lambda *a: self.records.append(a), effect=effect)
+                               record=lambda *a: self.records.append(a), effect=effect, send_photos=send_photos)
 
     def ui(self, app_id, path, body=None, origin=None):
         app = self.apps[app_id]
@@ -183,6 +184,90 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.service.load()["conversation"]), 3)
         with self.assertRaises(ShoppingError):
             self.service.command(99, "telegram:99", "shoes", "wrong-owner")
+
+    def test_web_order_photo_survives_restart_without_duplicate_confirmation(self):
+        from unittest.mock import patch
+        self.kickoff()
+        self.message("dayform", "day-one-lite", "Please place a simulated order in US 9, up to $120 total.")
+        photos = []
+        def sent(*args):
+            photos.append(args)
+            return {"message_ids": [36], "media_group_id": None}
+        service = self.new_service(send_photos=sent)
+        save = service.save
+        def crash_after_photo(state):
+            if any(r.get("notified") for r in state["receipts"].values()):
+                raise OSError("crash before notification flag was saved")
+            save(state)
+        with patch.object(service, "save", side_effect=crash_after_photo), self.assertRaises(OSError):
+            service.poll_once(42)
+        self.assertEqual(self.new_service(send_photos=sent).poll_once(42), [])
+        self.assertEqual(len(photos), 1)
+        chat, images, caption = photos[0]
+        self.assertEqual(chat, 42)
+        self.assertEqual(images, [((ROOT / "examples/shopping/dayform/shoe.png").read_bytes(), "image/png")])
+        order = next(r["order"] for r in service.load()["receipts"].values() if "order" in r)
+        for fact in (order["order_id"], "Day One Lite / Ink", "US 9", "$85.80", "No payment was taken."):
+            self.assertIn(fact, caption)
+        self.assertEqual(self.notifications, [], "photo caption replaces a separate text confirmation")
+        self.assertFalse(service.active_for(42))
+        self.assertEqual(len(self.transcript("dayform")["outputs"]), 1)
+        with self.servers["dayform"].store.transaction() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM orders").fetchone()[0], 1)
+
+    def test_failed_order_photo_and_text_retry_never_repeat_upload_or_purchase(self):
+        self.kickoff()
+        self.message("dayform", "day-one-lite", "Please place a simulated order in US 9, up to $120 total.")
+        attempts = []
+        def uncertain(*args):
+            attempts.append(args)
+            raise ShoppingError("Telegram photo delivery could not be confirmed")
+        self.assertTrue(self.new_service(send_photos=uncertain, notify=lambda *_: False).poll_once(42))
+        self.assertTrue(self.service.active_for(42))
+        calls = len(self.brain.calls)
+        self.assertEqual(self.new_service(send_photos=uncertain).poll_once(42), [])
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(len(self.brain.calls), calls)
+        self.assertEqual(len(self.notifications), 1)
+        self.assertIn("$85.80", self.notifications[0][1])
+        self.assertFalse(self.service.active_for(42))
+        with self.servers["dayform"].store.transaction() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM orders").fetchone()[0], 1)
+
+    def test_unavailable_order_image_falls_back_to_full_confirmation(self):
+        self.kickoff()
+        self.message("dayform", "day-one-lite", "Please place a simulated order in US 9, up to $120 total.")
+        photos = []
+        def missing_image(fn, *a, **kw):
+            if fn.__name__ == "image":
+                raise ShoppingError("Product image is unavailable")
+            return fn(*a, **kw)
+        self.assertEqual(self.new_service(effect=missing_image, send_photos=lambda *a: photos.append(a)).poll_once(42), [])
+        self.assertEqual(photos, [])
+        self.assertEqual(len(self.notifications), 1)
+        self.assertIn("Simulated order confirmed", self.notifications[0][1])
+        self.assertIn("$85.80", self.notifications[0][1])
+        self.assertFalse(self.service.active_for(42))
+
+    def test_telegram_order_photo_uses_order_facts_after_task_ends(self):
+        from unittest.mock import patch
+        self.kickoff()
+        text = self.service.telegram(42, "Please place a simulated order for Day One Lite, US 9, up to $120 total.", "telegram-order")
+        self.assertFalse(self.service.active_for(42))
+        photos = []
+        def sent(*args):
+            photos.append(args)
+            return {"message_ids": [37], "media_group_id": None}
+        product = dict(self.apps["dayform"].product("day-one-lite"), name="Changed catalog name", total_cents=99999)
+        with patch.object(AppConnection, "product", return_value=product):
+            self.assertFalse(self.service.deliver_photos(99, "telegram-order", sent).delivered)
+            self.assertTrue(self.service.deliver_photos(42, "telegram-order", sent).delivered)
+        self.assertTrue(self.new_service().deliver_photos(42, "telegram-order", sent).delivered)
+        self.assertEqual(len(photos), 1)
+        self.assertIn("Day One Lite / Ink", photos[0][2])
+        self.assertIn("$85.80", photos[0][2])
+        self.assertNotIn("Changed catalog name", photos[0][2])
+        self.assertIn("$85.80", text)
 
     def test_account_auth_session_routing_and_disclosure_boundaries(self):
         with self.assertRaises(ShoppingError):
@@ -348,6 +433,24 @@ class ShoppingIntegrationTests(unittest.TestCase):
             bot.handle_event(third)
             self.assertEqual(sender.call_count, 3, "ambiguous uploads must not replay")
             self.assertEqual(len(chat.sent), 1)
+            sender.side_effect = None
+            sender.return_value = {"message_ids": [36], "media_group_id": None}
+            self.message("dayform", "day-one-lite", "Please place a simulated order in US 9, up to $120 total.")
+            with bot._conversation_lock:
+                self.assertEqual(bot._shopping_service().poll_once(42), [])
+            self.assertEqual(sender.call_count, 4)
+            self.assertEqual(len(sender.call_args.args[2]), 1)
+            self.assertIn("$85.80", sender.call_args.args[3])
+            self.assertEqual(len(chat.sent), 1, "web order photo replaces text notification")
+            bot.handle_event(ChatEvent(cursor="4", conversation_id=42, message_id="4", text="/shop shoes"))
+            order_event = ChatEvent(cursor="5", conversation_id=42, message_id="5",
+                                   text="Please place a simulated order for Day One Lite, US 9, up to $120 total.")
+            bot.handle_event(order_event)
+            self.assertEqual(sender.call_count, 6)
+            self.assertIn("$85.80", sender.call_args.args[3])
+            self.assertEqual(len(chat.sent), 1, "Telegram order photo replaces text reply")
+            bot.handle_event(order_event)
+            self.assertEqual(sender.call_count, 6, "acknowledged order photo must not repeat")
 
     def test_unavailable_runtime_has_bounded_attempts_and_no_purchase(self):
         self.kickoff()

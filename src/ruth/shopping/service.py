@@ -49,11 +49,12 @@ def stable_id(text):
 
 class ShoppingService:
     def __init__(self, root: Path, *, respond, notify, record=lambda *_: None,
-                 effect=lambda fn, *a, **kw: fn(*a, **kw), apps=None):
+                 effect=lambda fn, *a, **kw: fn(*a, **kw), apps=None, send_photos=None):
         self.root = root
         self.path = private_state_path("shopping/state.json", root)
         self.apps: dict[str, AppConnection] = apps if apps is not None else load_registry(root)
         self.respond, self.notify, self.record, self.effect = respond, notify, record, effect
+        self.send_photos = send_photos
 
     def load(self):
         return load_json_object(self.path, default_factory=lambda: {
@@ -112,7 +113,7 @@ class ShoppingService:
         return receipt["output"]["text"]
 
     def deliver_photos(self, chat_id, event_id, send_photos):
-        """Deliver the recommendation as one album; the caller handles text fallback.
+        """Deliver a recommendation album or order photo; caller handles text fallback.
 
         Claim the whole album before upload. Never blindly retry an ambiguous send.
         """
@@ -123,6 +124,8 @@ class ShoppingService:
             if not state.get("task") or state["task"]["chat_id"] != chat_id:
                 return PhotoDelivery()
             receipt = state["receipts"].get("chat-" + stable_id(event_id), {})
+            if receipt.get("order"):
+                return self._deliver_order_photo(state, receipt, chat_id, send_photos)
             cards = receipt.get("output", {}).get("recommendations", [])
             if not cards:
                 return PhotoDelivery()
@@ -146,6 +149,38 @@ class ShoppingService:
                 return PhotoDelivery(error=str(error))
             self.save(state)
             return PhotoDelivery(delivered=True)
+
+    def _deliver_order_photo(self, state, receipt, chat_id, send_photos):
+        """Caller holds the state lock. A photo failure must never repeat the order."""
+        from .photos import PhotoDelivery, order_caption
+
+        previous = receipt.get("order_photo")
+        if previous:
+            return PhotoDelivery(previous["status"] == "delivered", previous.get("error", ""))
+        if send_photos is None:
+            return PhotoDelivery()
+        receipt["order_photo"] = {"status": "attempted"}
+        self.save(state)
+        try:
+            order = receipt["order"]
+            app = self.apps.get(order["app_id"])
+            if app is None:
+                raise ShoppingError("Order's product app is unavailable")
+            product = self.effect(app.product, order["product_id"])
+            if not product.get("image"):
+                raise ShoppingError("Ordered product has no photo")
+            photo = self.effect(app.image, product["image"])
+            # Catalog supplies only the image; the confirmed order owns all receipt facts.
+            caption = order_caption(self._order_text(order))
+            result = self.effect(send_photos, chat_id, [photo], caption)
+            receipt["order_photo"] = {"status": "delivered", **result}
+        except (ShoppingError, OSError) as error:
+            detail = str(error) if isinstance(error, ShoppingError) else "Order photo is unavailable"
+            receipt["order_photo"] = {"status": "failed", "error": detail}
+            self.save(state)
+            return PhotoDelivery(error=detail)
+        self.save(state)
+        return PhotoDelivery(delivered=True)
 
     def poll_once(self, chat_id=None):
         with file_transaction(self.path):
@@ -200,7 +235,8 @@ class ShoppingService:
             receipt["delivered"] = True
             self.save(state)
         if receipt.get("order") and not receipt.get("notified"):
-            if not self.notify(task["chat_id"], self._order_text(receipt["order"]), "shopping-" + key):
+            photo = self._deliver_order_photo(state, receipt, task["chat_id"], self.send_photos)
+            if not photo.delivered and not self.notify(task["chat_id"], self._order_text(receipt["order"]), "shopping-" + key):
                 raise ShoppingError("Order completed; Telegram notification is waiting to retry")
             receipt["notified"] = True
             self.save(state)

@@ -81,6 +81,15 @@ The caption numbers products in photo order, with each store/product name, price
 total including mock tax, and a clickable connected product link. A short opening
 recommendation is included within Telegram's caption limit. The full reply stays
 in Ruth's conversation; successful albums do not generate a separate text message.
+
+Order confirmations use one product photo with the order number, product, size,
+confirmed total and simulated-payment notice in its caption. This applies both
+to orders placed through a web app and through Telegram. The ordered product's
+app supplies the image; all receipt details come from the confirmed order, even
+if the catalog changes later. A durable order-photo receipt prevents repeated
+uploads on replay. Missing images, oversized captions or uncertain photo delivery
+fall back to the full text confirmation; an uncertain send can produce a photo
+plus fallback text, but never triggers another purchase.
 One recommended product uses `sendPhoto` with the same caption format.
 
 The caption also includes **View all options**, a link to a user-side shortlist

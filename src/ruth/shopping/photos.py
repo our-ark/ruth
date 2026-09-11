@@ -54,6 +54,14 @@ def recommendation_caption(cards, intro="", view_all_url=""):
             + "\n\n".join(html) + "\n\n" + footer)
 
 
+def order_caption(text):
+    """Keep the authoritative receipt intact, with a bold confirmation heading."""
+    if _units(text) > 1024:
+        raise ShoppingError("Order receipt exceeds the photo caption limit")
+    heading, _, details = text.partition("\n")
+    return f"<b>{escape(heading)}</b>\n{escape(details)}"
+
+
 def send_product_photos(token, chat_id, photos, caption):
     """One album upload (or one photo), with one shared HTML caption."""
     if not 1 <= len(photos) <= 6:
@@ -91,14 +99,14 @@ def send_product_photos(token, chat_id, photos, caption):
         with build_opener(NoRedirect()).open(request, timeout=30) as response:
             result = json.loads(response.read(1_000_000))
     except HTTPError as error:
-        raise ShoppingError(f"Telegram rejected the recommendation (HTTP {error.code})") from None
+        raise ShoppingError(f"Telegram rejected the photo message (HTTP {error.code})") from None
     except (OSError, ValueError):
-        raise ShoppingError("Telegram recommendation delivery could not be confirmed") from None
+        raise ShoppingError("Telegram photo delivery could not be confirmed") from None
     payload = result.get("result") if isinstance(result, dict) else None
     messages = payload if multiple else [payload]
     if (not isinstance(result, dict) or not result.get("ok") or not isinstance(messages, list)
             or len(messages) != len(photos) or any(not isinstance(m, dict) or type(m.get("message_id")) is not int for m in messages)):
-        raise ShoppingError("Telegram recommendation delivery could not be confirmed")
+        raise ShoppingError("Telegram photo delivery could not be confirmed")
     groups = {m.get("media_group_id") for m in messages}
     if multiple and (len(groups) != 1 or not next(iter(groups))):
         raise ShoppingError("Telegram album delivery could not be confirmed")

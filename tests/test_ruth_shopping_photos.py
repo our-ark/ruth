@@ -8,10 +8,19 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 from ruth.shopping.client import ShoppingError
-from ruth.shopping.photos import recommendation_caption, send_product_photos
+from ruth.shopping.photos import order_caption, recommendation_caption, send_product_photos
 
 
 class ShoppingPhotoTransportTests(unittest.TestCase):
+    def test_order_caption_preserves_receipt_and_escapes_product_markup(self):
+        text = "Simulated order confirmed: DAYFORM-123\nDay <One> & Ink · US 9\n$85.80 total. No payment was taken."
+        caption = order_caption(text)
+        self.assertIn("<b>Simulated order confirmed: DAYFORM-123</b>", caption)
+        self.assertIn("Day &lt;One&gt; &amp; Ink · US 9", caption)
+        self.assertIn("$85.80 total. No payment was taken.", caption)
+        with self.assertRaises(ShoppingError):
+            order_caption(text + "😀" * 600)
+
     def upload(self, photos, result):
         caption = '<b>Options</b>\n<a href="http://127.0.0.1:8011/?product=day-one#connect=demo">Open option 1</a>'
         with patch("ruth.shopping.photos.build_opener") as factory:

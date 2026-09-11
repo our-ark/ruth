@@ -917,8 +917,8 @@ class RuthApplication:
 
     def _finish_chat_event(self, event: ChatEvent, receipt: InboxReceipt) -> None:
         if not receipt.reply_sent:
-            album_delivered = self._deliver_shopping_photos(event.conversation_id, receipt.key)
-            delivery = NotificationResult(delivered=True) if album_delivered else (
+            photo_delivered = self._deliver_shopping_photos(event.conversation_id, receipt.key)
+            delivery = NotificationResult(delivered=True) if photo_delivered else (
                 self._deliver_message(
                     event.conversation_id,
                     receipt.reply,
@@ -1704,6 +1704,7 @@ class RuthApplication:
                 ).delivered,
                 record=self._record_turn,
                 effect=self.effect_fence.run,
+                send_photos=self._send_shopping_photos if self.channel_name == "telegram" else None,
             )
         return self._shopping
 
@@ -1722,7 +1723,6 @@ class RuthApplication:
 
     def _deliver_shopping_photos(self, chat_id, event_id):
         from ruth.shopping.client import ShoppingError
-        from ruth.shopping.photos import send_product_photos
 
         # The inherited text-only provider remains usable for console/other channels.
         token = getattr(getattr(self.client, "config", None), "token", "")
@@ -1732,17 +1732,27 @@ class RuthApplication:
             shopping = self._shopping_service()
             if shopping is None:
                 return False
-            def send(chat, photos, caption):
-                # ShoppingService already holds the epoch fence around this callback.
-                self.authorization.require("shopping.send-photo", ("chat.send",))
-                return send_product_photos(token, chat, photos, caption)
-            result = shopping.deliver_photos(chat_id, event_id, send)
+            result = shopping.deliver_photos(chat_id, event_id, self._send_shopping_photos)
             if result.error:
                 print("Ruth shopping photos: " + result.error)
             return result.delivered
         except (ShoppingError, OSError, CapabilityAuthorizationError) as error:
-            print(f"Ruth shopping photos unavailable ({type(error).__name__}); text recommendation retained")
+            print(f"Ruth shopping photos unavailable ({type(error).__name__}); text reply retained")
             return False
+
+    def _send_shopping_photos(self, chat_id, photos, caption):
+        from ruth.shopping.client import ShoppingError
+        from ruth.shopping.photos import send_product_photos
+
+        token = getattr(getattr(self.client, "config", None), "token", "")
+        if self.channel_name != "telegram" or not token or _allowed_conversation_id(self.client) != chat_id:
+            raise ShoppingError("Telegram photo delivery is not configured for this conversation")
+        # ShoppingService already holds the epoch fence around this callback.
+        try:
+            self.authorization.require("shopping.send-photo", ("chat.send",))
+        except CapabilityAuthorizationError:
+            raise ShoppingError("Telegram photo delivery is not authorized") from None
+        return send_product_photos(token, chat_id, photos, caption)
 
     def _start_shopping_worker(self):
         if self._shopping_worker is not None:
