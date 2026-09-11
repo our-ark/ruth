@@ -136,7 +136,8 @@ class ShoppingService:
                 for card in cards:
                     app = self.apps[card["app_id"]]
                     photos.append(self.effect(app.image, card["image"]))
-                caption = recommendation_caption(cards, receipt["output"].get("recommendation_intro", ""))
+                caption = recommendation_caption(cards, receipt["output"].get("recommendation_intro", ""),
+                                                 receipt["output"].get("view_all_url", ""))
                 result = self.effect(send_photos, chat_id, photos, caption)
                 receipt["photo_album"] = {"status": "delivered", **result}
             except ShoppingError as error:
@@ -218,7 +219,7 @@ class ShoppingService:
         if kickoff:
             for app in self.apps.values():
                 products.extend(self.effect(app.products))
-        recent = [{**item, "reply": re.sub(r"#connect=[^\s]+", "", item["reply"])}
+        recent = [{**item, "reply": re.sub(r"#(?:connect|options)=[^\s]+", "", item["reply"])}
                   for item in state["conversation"][-12:]]
         payload = {"turn": turn, "available_apps": [{"app_id": a.app_id, "name": a.name} for a in self.apps.values()],
                    "catalog": products, "recent_collaboration": recent}
@@ -285,8 +286,13 @@ class ShoppingService:
                 output = {"id": key, "in_reply_to": turn["message"]["id"], "text": reply,
                           "shared_context": shared}
                 if cards:
+                    from .options import options_link
                     output["recommendations"] = cards
                     output["recommendation_intro"] = intro
+                    view_all = options_link(self.root, cards, self.apps)
+                    if view_all:
+                        output["view_all_url"] = view_all
+                        output["text"] += "\n\nView all options:\n" + view_all
                 return output
             try:
                 app = self.apps[decision["app_id"]]

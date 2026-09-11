@@ -281,6 +281,17 @@ class ShoppingIntegrationTests(unittest.TestCase):
         with self.assertRaises(ShoppingError):
             app.image("/")
 
+    def test_view_all_link_is_in_recommendation_but_not_forwarded_to_model(self):
+        from ruth.shopping.client import registry_path
+        from ruth.state import atomic_write
+        atomic_write(registry_path(self.root), json.dumps({"options_url": "http://127.0.0.1:8010"}))
+        reply = self.kickoff()
+        self.assertIn("View all options:", reply)
+        self.assertIn("/#options=", reply)
+        self.service.telegram(42, "Compare the comfort", "telegram-2")
+        self.assertNotIn("#options=", json.dumps(self.brain.calls))
+        self.assertNotIn("#connect=", json.dumps(self.brain.calls))
+
     def test_ruth_command_dispatch_uses_telegram_session_for_app_turns(self):
         from unittest.mock import patch
         from ruth.app.core import RuthApplication
