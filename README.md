@@ -7,9 +7,33 @@ Ruth is an independently versioned personal agent descended from
 [Genesis](https://github.com/our-ark/genesis). This repository contains her
 software body; each local instance has its own private state.
 
-Ruth includes a local cross-application shopping prototype: two mock stores
-share an app API and chat UI SDK, while `/shop` connects them to Ruth's existing
-conversation and model runtime. See the [runnable walkthrough](docs/shopping-demo.md).
+Ruth is the reference personal agent for **UAAP — User–Agent–App Protocol**.
+UAAP enables collaboration among users, their persistent personal agents, and
+applications through **message delivery and context exchange**. The personal
+agent maintains continuity; applications retain domain authority; the user
+governs their collaboration.
+
+The local shopping prototype connects two mock stores through the shared
+UAAP App SDK. `/shop` brings them into Ruth's existing conversation and model
+runtime. Start with the [UAAP protocol](protocol/README.md),
+[App SDK](libraries/app-sdk/README.md), or
+[runnable walkthrough](docs/shopping-demo.md).
+
+## UAAP in this repository
+
+**One Agent, Anywhere** is the vision; **UAAP** defines the collaboration
+contracts; **Ruth** demonstrates them as a persistent personal agent.
+
+| Location | Role |
+| --- | --- |
+| [`protocol/`](protocol/README.md) | UAAP working draft: roles, message/context semantics, and the current HTTP mapping |
+| [`libraries/app-sdk/`](libraries/app-sdk/README.md) | UAAP App SDK: app-hosted reference adapter and shared browser chat component |
+| [`src/ruth/shopping/`](src/ruth/shopping) | Ruth's UAAP integration, task lifecycle, and shopping orchestration |
+| [`examples/shopping/`](examples/shopping/README.md) | DAYFORM and STRIDE: two participating apps with different storefronts |
+
+UAAP's contracts are independent of Ruth's model and runtime. The current SDK
+implements a local shopping example; its product context and preference fields
+are specific to that example. Product search and ordering use ordinary app APIs.
 
 ## Mission
 
@@ -55,7 +79,7 @@ Use Ruth's own Telegram bot and authorized chat. After configuring them,
 `bin/ruth-daemon start` starts the instance. The provider supports interactive
 setup so credentials need not be committed to code.
 
-## Application collaboration
+## Application collaboration with UAAP
 
 Applications contribute local state and domain intelligence. Ruth contributes
 the user's continuing context, preferences, and goals. The same conversation

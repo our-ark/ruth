@@ -2,7 +2,9 @@
 
 Status: the initial polling-based prototype is implemented. This document keeps
 the original design rationale; see [running the prototype](shopping-demo.md)
-for the current code, setup, exact contract and limitations.
+for the current code, setup and limitations. The collaboration contracts are
+now named [UAAP — User–Agent–App Protocol](../protocol/README.md); that working
+draft documents the current HTTP mapping.
 
 The user starts shopping with `/shop` in Telegram. Ruth searches two registered
 applications, sends recommendations to Telegram, and continues the same

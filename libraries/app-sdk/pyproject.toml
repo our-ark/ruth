@@ -1,7 +1,7 @@
 [project]
 name = "our-ark-app-sdk"
 version = "0.1.0"
-description = "App-hosted message and context contracts for personal agents"
+description = "UAAP reference app SDK for personal-agent message delivery and context exchange"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = []

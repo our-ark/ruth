@@ -1,6 +1,8 @@
 # Application collaboration
 
-This describes the broader application collaboration design. The initial
+This describes the broader **One Agent, Anywhere** architecture.
+[UAAP — User–Agent–App Protocol](../protocol/README.md) names its message
+delivery and context exchange contracts. The initial
 [shopping prototype](shopping-demo.md) implements message delivery, context
 exchange and simulated actions with two apps. Activity tracking and SSE below
 remain future work; the prototype uses message-time snapshots and polling.

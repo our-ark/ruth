@@ -1,10 +1,14 @@
 # Run the One Agent, Anywhere prototype
 
+This is the reference shopping implementation of
+[UAAP — User–Agent–App Protocol](../protocol/README.md), with Ruth as the
+persistent personal agent and DAYFORM/STRIDE as participating applications.
 All source is in this repository. No external demo checkout is needed.
 
 | Location | Responsibility |
 | --- | --- |
-| `libraries/app-sdk` | Independent Python app adapter, durable message/context store, shared browser chat component |
+| `protocol` | UAAP working draft and current HTTP mapping |
+| `libraries/app-sdk` | UAAP App SDK: independent Python app adapter, durable message/context store, shared browser chat component |
 | `examples/shopping/dayform` | Warm DAYFORM storefront and mock catalog |
 | `examples/shopping/stride` | Dark STRIDE STUDIO storefront and mock catalog |
 | `examples/shopping/store.js` | Shared product-page controller (served by both apps) |
@@ -120,9 +124,10 @@ phone's Telegram browser. Remote HTTPS deployment/account onboarding is outside
 this local demo. `--dayform-port` and `--stride-port` select other ports when
 creating a new demo root; reuse the configured ports thereafter.
 
-## Protocol and data ownership
+## UAAP and data ownership
 
-The agent-facing adapter exposes the two collaboration operations:
+The [UAAP working draft](../protocol/README.md) defines the collaboration
+semantics. The current agent-facing adapter exposes two HTTP operations:
 
 - `GET /collaboration/events?after=<cursor>` returns up to 20 user messages,
   each with `event_id`, `session_id`, `message`, `context`, `created_at`, and a
