@@ -112,9 +112,8 @@ def console(root):
     def poll_activity():
         while not stop.wait(1):
             try:
-                if service.active_for("demo-console"):
-                    for error in service.activity.poll_once():
-                        print(f"App activity: {error}")
+                for error in service.poll_activity("demo-console"):
+                    print(f"App activity: {error}")
             except Exception as error:
                 print(f"App activity poll: {error}")
     activity_worker = threading.Thread(target=poll_activity, daemon=True)

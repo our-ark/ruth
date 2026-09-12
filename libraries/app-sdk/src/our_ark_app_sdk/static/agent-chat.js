@@ -49,6 +49,8 @@ export class AgentChat extends HTMLElement {
   async request(path, body) {
     const response = await fetch(path, {method: body ? "POST" : "GET", credentials: "same-origin",
       headers: body ? {"Content-Type": "application/json"} : {}, body: body ? JSON.stringify(body) : undefined,
+      // Let an inactive update finish when its tab closes or navigates away.
+      keepalive: path === "/ui/activity",
       signal: AbortSignal.timeout(10000)});
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "The store is unavailable. Try again.");

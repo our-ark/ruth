@@ -82,6 +82,14 @@ class ShoppingService:
         task = self.load().get("task")
         return bool(task and task["active"] and task["chat_id"] == chat_id)
 
+    def poll_activity(self, chat_id):
+        if not self.active_for(chat_id):
+            return []
+        errors = self.activity.poll_once()
+        if self.active_for(chat_id) and not self.activity.announce(chat_id, self.notify):
+            errors.append("App activity update is waiting for chat delivery to retry")
+        return errors
+
     def command(self, chat_id, session_key, argument, event_id):
         with file_transaction(self.path):
             state = self.load()

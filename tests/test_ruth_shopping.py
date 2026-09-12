@@ -125,6 +125,29 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.assertEqual(self.notifications, [])
         self.assertEqual(self.transcript('dayform')['messages'], [])
 
+    def test_active_task_announces_to_owner_without_model_calls_and_cancel_stops_it(self):
+        from unittest.mock import patch
+        self.kickoff()
+        with patch('ruth.shopping.activity.time.time', return_value=1000):
+            self.activity('dayform', 'presence', 1, state='active')
+            self.assertEqual(self.service.poll_activity(43), [])
+            self.assertFalse(self.service.activity.path.exists(), 'another chat must not consume activity')
+            self.assertEqual(self.service.poll_activity(42), [])
+        with patch('ruth.shopping.activity.time.time', return_value=1003):
+            self.assertEqual(self.service.poll_activity(42), [])
+            self.assertEqual(len(self.notifications), 1)
+            self.assertEqual(self.notifications[0][0], 42)
+            self.assertIn('Active app: dayform', self.notifications[0][1])
+            self.assertEqual(self.new_service().poll_activity(42), [])
+            self.assertEqual(len(self.notifications), 1)
+            self.service.command(42, 'telegram:42', 'cancel', 'cancel')
+            self.activity('dayform', 'presence', 2, state='inactive')
+            self.activity('stride', 'presence', 1, state='active')
+        with patch('ruth.shopping.activity.time.time', return_value=1006):
+            self.service.poll_activity(42)
+        self.assertEqual(len(self.notifications), 1)
+        self.assertEqual(len(self.brain.calls), 1)
+
     def test_activity_keeps_up_during_reasoning_without_changing_message_context(self):
         self.kickoff()
         self.message('dayform', 'day-one', 'Question on the first pair')

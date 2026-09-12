@@ -1768,8 +1768,7 @@ class RuthApplication:
                     self.effect_fence.require_current()
                     shopping = self._shopping_service()
                     owner = _allowed_conversation_id(self.client)
-                    errors = shopping.activity.poll_once() if (
-                        shopping and owner is not None and shopping.active_for(owner)) else []
+                    errors = shopping.poll_activity(owner) if shopping and owner is not None else []
                     summary = "; ".join(errors)
                     if summary and summary != previous_error:
                         print(f"Ruth app activity: {summary}")

@@ -36,7 +36,7 @@ class ApplicationCompositionTests(unittest.TestCase):
     def test_activity_worker_updates_while_conversation_lock_is_held(self):
         updated = threading.Event()
         shopping = SimpleNamespace(active_for=lambda owner: owner == 42,
-                                   activity=SimpleNamespace(poll_once=lambda: (updated.set() or [])),
+                                   poll_activity=lambda owner: (updated.set() or []) if owner == 42 else [],
                                    poll_once=lambda owner: [])
         bot = SimpleNamespace(_shopping_worker=None, _shopping_activity_worker=None,
                               _shopping_service=lambda: shopping,

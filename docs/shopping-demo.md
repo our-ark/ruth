@@ -138,14 +138,21 @@ Both websites enable UAAP's optional `context-presence/1` extension. After you
 connect a store, switching product/size sends `context.updated`; focus, visibility
 and a 15-second heartbeat send `presence.updated`. A 45-second lease expires to
 unknown if the tab closes, the browser goes offline, or reporting stops. Updates
-are limited to connected app sessions, and are not Telegram notifications.
+are limited to connected app sessions. Ruth sends a short Telegram announcement
+when one app remains uniquely active for two seconds: first arrival, then
+transitions such as `DAYFORM → STRIDE STUDIO`, with the viewed product when known.
+Heartbeats, product changes within the same app, conflicting app presence and
+expired presence do not create additional announcements. Multiple active sessions
+in the same app can identify the app without guessing the viewed product. Brief focus changes are debounced.
+Announcements include the observation time; durable text/keys survive send failures
+and restarts. Telegram provider guarantees still apply to uncertain delivery.
 
 During an active `/shop` task, a separate worker refreshes Ruth's observed state
 without waiting for an ongoing model turn. `/shop status` reports the current
 observed app/product, multiple active sessions, or unknown. Her next shopping
 turn includes the observed state separately from the original message snapshot.
 Ruth continues replying to the message's source session after a page switch.
-`/shop cancel` stops both message and activity polling.
+`/shop cancel` stops message/activity polling and app-switch announcements.
 
 Activity uses its own cursor and `.ruth/shopping/activity.json`. Each app database
 keeps only the latest context/presence event per session. No complete browsing
@@ -235,6 +242,7 @@ model turn; output/order idempotency protects the corresponding demo effects.
 python3.13 -m unittest tests.test_ruth_shopping -v
 python3.13 -m unittest tests.test_uaap_sdk -v
 node tests/test_uaap_activity_ui.cjs
+python3.13 -m unittest tests.test_ruth_activity_notifications -q
 python3.13 -m unittest tests.test_ruth_shopping_photos -q
 node tests/test_shopping_order_ui.cjs
 python3.13 -m unittest tests.test_ruth_telegram tests.test_ruth_brain tests.test_ruth_application tests.test_ruth_command_registry -q

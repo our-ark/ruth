@@ -194,8 +194,10 @@ The reference adapter supplies authenticated, same-origin `POST /ui/activity` an
 for custom app integrations. Generic `MessageStore` disables the extension by
 default; the two shopping apps explicitly enable it.
 
-Activity updates do not contain user messages, trigger replies, enter a chat
-transcript, or authorize purchases. They cannot be used as `in_reply_to` targets.
+Activity updates do not contain user messages, require replies, enter a chat
+transcript as user messages, or authorize purchases. An agent may send user-enabled
+activity announcements through its own channel; these are separate from app replies
+and do not change the extension contract. They cannot be used as `in_reply_to` targets.
 The agent may include observed activity as separately labeled context on its
 next reasoning turn. It must retain the original message snapshot and route its
 reply to that message's source session, regardless of subsequent activity.

@@ -16,6 +16,7 @@ export class ActivityReporter {
     this.update();
     this.timer = this.win.setInterval(() => {
       if (this.active()) this.update();
+      else if (this.lastPresence !== "inactive") this.presence("inactive");
     }, 15000);
   }
 
@@ -37,7 +38,9 @@ export class ActivityReporter {
     }
   }
 
-  presence(state) { return this.publish("presence.updated", {state}); }
+  async presence(state) {
+    if (await this.publish("presence.updated", {state})) this.lastPresence = state;
+  }
 
   async contextChanged() {
     const context = structuredClone(this.context());

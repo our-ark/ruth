@@ -94,7 +94,8 @@ carries its page/product snapshot, and each answer goes back to its source
 session. Ordinary product APIs support search, details and simulated orders.
 Connected apps can also report page context and focused-session presence through
 the optional UAAP `context-presence/1` extension. `/shop status` shows Ruth's
-current observation; stale presence expires to unknown. No public inbound Ruth
+current observation; stable app changes also produce brief Telegram updates.
+Stale presence expires to unknown. No public inbound Ruth
 endpoint is required.
 
 All code is in this repository: `libraries/agent-sdk`, `libraries/app-sdk`,
