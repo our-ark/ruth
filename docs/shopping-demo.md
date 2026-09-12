@@ -132,6 +132,28 @@ phone's Telegram browser. Remote HTTPS deployment/account onboarding is outside
 this local demo. `--dayform-port` and `--stride-port` select other ports when
 creating a new demo root; reuse the configured ports thereafter.
 
+## Current app and page activity
+
+Both websites enable UAAP's optional `context-presence/1` extension. After you
+connect a store, switching product/size sends `context.updated`; focus, visibility
+and a 15-second heartbeat send `presence.updated`. A 45-second lease expires to
+unknown if the tab closes, the browser goes offline, or reporting stops. Updates
+are limited to connected app sessions, and are not Telegram notifications.
+
+During an active `/shop` task, a separate worker refreshes Ruth's observed state
+without waiting for an ongoing model turn. `/shop status` reports the current
+observed app/product, multiple active sessions, or unknown. Her next shopping
+turn includes the observed state separately from the original message snapshot.
+Ruth continues replying to the message's source session after a page switch.
+`/shop cancel` stops both message and activity polling.
+
+Activity uses its own cursor and `.ruth/shopping/activity.json`. Each app database
+keeps only the latest context/presence event per session. No complete browsing
+history is retained by this feed. Restart preserves activity state and expiry;
+stale observations never acquire a new lease just because Ruth reads them again.
+Reload the websites after updating the SDK. If a website server was restarted,
+reconnect through a Ruth recommendation link to renew the browser cookie.
+
 ## UAAP and data ownership
 
 The [UAAP working draft](../protocol/README.md) defines the collaboration
@@ -202,8 +224,8 @@ purchase request gets its own order key; replay of that request reuses its key.
 The existing Telegram provider's delivery guarantees still apply; a
 provider cannot guarantee exactly-once delivery after every ambiguous failure.
 
-There is one active shopping task and one user per registry. No SSE, presence
-broker, dynamic user tracking, dynamic discovery, real checkout, user study or
+There is one active shopping task and one user per registry. No SSE, central
+broker, dynamic discovery, real checkout, user study or
 model-quality benchmark is implemented. A crash during reasoning can repeat a
 model turn; output/order idempotency protects the corresponding demo effects.
 
@@ -212,6 +234,7 @@ model turn; output/order idempotency protects the corresponding demo effects.
 ```bash
 python3.13 -m unittest tests.test_ruth_shopping -v
 python3.13 -m unittest tests.test_uaap_sdk -v
+node tests/test_uaap_activity_ui.cjs
 python3.13 -m unittest tests.test_ruth_shopping_photos -q
 node tests/test_shopping_order_ui.cjs
 python3.13 -m unittest tests.test_ruth_telegram tests.test_ruth_brain tests.test_ruth_application tests.test_ruth_command_registry -q

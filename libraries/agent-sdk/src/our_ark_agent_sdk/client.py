@@ -3,19 +3,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 import re
 from typing import ClassVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .types import AgentOutput, EventBatch
+from .types import ActivityBatch, AgentOutput, EventBatch
 
 
 class UAAPError(RuntimeError):
-    def __init__(self, message, *, retryable=False):
+    def __init__(self, message, *, retryable=False, status_code=None):
         super().__init__(message)
         self.retryable = retryable
+        self.status_code = status_code
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -65,7 +67,8 @@ class AppClient:
             finally:
                 error.close()
             raise self.error_type(f"{self.name}: {detail} (HTTP {error.code})",
-                                  retryable=error.code >= 500 or error.code == 429) from None
+                                  retryable=error.code >= 500 or error.code == 429,
+                                  status_code=error.code) from None
         except (URLError, TimeoutError, OSError, ValueError) as error:
             raise self.error_type(f"{self.name} is unavailable ({type(error).__name__}); retry later",
                                   retryable=True) from None
@@ -92,6 +95,59 @@ class AppClient:
             cursor = event["cursor"]
         if type(batch.get("cursor")) is not int or batch["cursor"] != cursor:
             raise self.error_type(f"{self.name} returned an invalid batch cursor")
+        return batch
+
+    def capabilities(self):
+        """Older message-only apps may return 404 and need no migration."""
+        try:
+            result = self.request("/collaboration/capabilities")
+        except UAAPError as error:
+            if error.status_code == 404:
+                return {"extensions": []}
+            raise
+        if (not isinstance(result, dict) or not isinstance(result.get("extensions"), list)
+                or any(not isinstance(item, str) for item in result["extensions"])):
+            raise self.error_type(f"{self.name} returned invalid capabilities")
+        return result
+
+    def activity(self, after=0) -> ActivityBatch:
+        """Read coalesced context/presence updates on an independent cursor.
+
+        This feed is latest state, not a complete activity history. Consumers
+        use expires_at minus server_time for lease age across different clocks.
+        """
+        if type(after) is not int or after < 0:
+            raise ValueError("after must be a non-negative integer")
+        batch = self.request(f"/collaboration/activity?after={after}")
+        def timestamp(value):
+            return type(value) in (int, float) and math.isfinite(value)
+        def valid_id(value):
+            return isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", value)
+        if (not isinstance(batch, dict) or not isinstance(batch.get("events"), list)
+                or not timestamp(batch.get("server_time"))):
+            raise self.error_type(f"{self.name} returned an invalid activity batch")
+        cursor = after
+        for event in batch["events"]:
+            if (not isinstance(event, dict) or type(event.get("cursor")) is not int
+                    or event["cursor"] <= cursor or event.get("app_id") != self.app_id
+                    or not valid_id(event.get("event_id")) or not valid_id(event.get("session_id"))
+                    or type(event.get("sequence")) is not int or not 0 < event["sequence"] <= 9007199254740991
+                    or not timestamp(event.get("received_at"))
+                    or event["received_at"] > batch["server_time"]):
+                raise self.error_type(f"{self.name} returned an invalid activity event")
+            kind = event.get("type")
+            if kind == "context.updated":
+                valid = isinstance(event.get("context"), dict)
+            elif kind == "presence.updated":
+                valid = (event.get("state") in ("active", "inactive") and timestamp(event.get("expires_at"))
+                         and 0 < event["expires_at"] - event["received_at"] <= 120)
+            else:
+                valid = False
+            if not valid:
+                raise self.error_type(f"{self.name} returned invalid activity context or presence")
+            cursor = event["cursor"]
+        if type(batch.get("cursor")) is not int or batch["cursor"] != cursor:
+            raise self.error_type(f"{self.name} returned an invalid activity cursor")
         return batch
 
     def output(self, session_id: str, body: AgentOutput) -> AgentOutput:

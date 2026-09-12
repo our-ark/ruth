@@ -42,13 +42,15 @@ function render() {
   document.querySelector("#total").textContent = `${money(selected.total_cents)} with mock tax · Shipping included`;
   history.replaceState(null, "", `/?product=${selected.id}${location.hash}`);
   updateOrderButton();
+  chat.contextChanged();
 }
 const requested = new URLSearchParams(location.search).get("product");
 if (products.some(p => p.id === requested)) productSelect.value = requested;
 render();
 productSelect.addEventListener("change", render);
-sizeSelect.addEventListener("change", () => { revision = crypto.randomUUID(); updateOrderButton(); });
+sizeSelect.addEventListener("change", () => { revision = crypto.randomUUID(); updateOrderButton(); chat.contextChanged(); });
 chat.contextProvider = () => ({revision, page_type:"product", product_id:selected.id, selected_size:sizeSelect.value});
+chat.contextChanged();
 orderButton.addEventListener("click", () => {
   if (orderButton.disabled) return;
   const state = orderButtonState(chat.transcript, selected.id, sizeSelect.value, chat.sending);

@@ -96,6 +96,108 @@ class ShoppingIntegrationTests(unittest.TestCase):
     def kickoff(self):
         return self.service.command(42, "telegram:42", "work sneakers, US 9, under $120 total", "telegram-1")
 
+    def activity(self, app, kind, sequence, **fields):
+        return self.ui(app, "/ui/activity", {"event_id": uuid4().hex, "session_id": self.sessions[app],
+                                             "type": kind + ".updated", "sequence": sequence, **fields})
+
+    def test_activity_expiry_switching_and_ambiguous_sessions_do_not_invoke_model(self):
+        from unittest.mock import patch
+        self.kickoff()
+        with patch('ruth.shopping.activity.time.time', return_value=1000):
+            self.activity('dayform', 'context', 1,
+                          context={'revision': 'r1', 'product_id': 'day-one', 'selected_size': '9'})
+            self.activity('dayform', 'presence', 1, state='active')
+            self.assertEqual(self.service.activity.poll_once(), [])
+            self.assertEqual(self.service.activity.snapshot()['current_session']['app_id'], 'dayform')
+            self.activity('stride', 'presence', 1, state='active')
+            self.service.activity.poll_once()
+            self.assertEqual(self.service.activity.snapshot()['status'], 'ambiguous')
+            self.activity('dayform', 'presence', 2, state='inactive')
+            self.service.activity.poll_once()
+            self.assertEqual(self.service.activity.snapshot()['current_session']['app_id'], 'stride')
+            self.assertIn('stride', self.service.command(42, 'telegram:42', 'status', 'status'))
+        with patch('ruth.shopping.activity.time.time', return_value=1046):
+            self.assertEqual(self.new_service().activity.snapshot()['status'], 'unknown')
+            # Restart/re-reading old state must never renew an expired lease.
+            self.new_service().activity.poll_once()
+            self.assertEqual(self.service.activity.snapshot()['status'], 'unknown')
+        self.assertEqual(len(self.brain.calls), 1)
+        self.assertEqual(self.notifications, [])
+        self.assertEqual(self.transcript('dayform')['messages'], [])
+
+    def test_activity_keeps_up_during_reasoning_without_changing_message_context(self):
+        self.kickoff()
+        self.message('dayform', 'day-one', 'Question on the first pair')
+        entered, release = threading.Event(), threading.Event()
+        failures = []
+        def respond(prompt, key):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError('test did not release model')
+            return self.brain(prompt, key)
+        self.service.respond = respond
+        def run():
+            try:
+                failures.extend(self.service.poll_once(42))
+            except Exception as error:
+                failures.append(error)
+        worker = threading.Thread(target=run)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            self.activity('stride', 'context', 1,
+                          context={'revision': 'r2', 'product_id': 'arc-02', 'selected_size': '9'})
+            self.activity('stride', 'presence', 1, state='active')
+            self.assertEqual(self.service.activity.poll_once(), [])
+            self.assertEqual(self.service.activity.snapshot()['current_session']['app_id'], 'stride')
+        finally:
+            release.set()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        self.assertIn('Viewing day-one;', self.transcript('dayform')['outputs'][0]['text'])
+        self.assertEqual(self.transcript('stride')['outputs'], [])
+        self.service.telegram(42, 'What am I looking at?', 'current-page')
+        observed = self.brain.calls[-1][1]['app_activity']['current_session']
+        self.assertEqual(observed['context']['product_id'], 'arc-02')
+
+    def test_activity_browser_routes_require_authentication_and_same_origin(self):
+        body = {'event_id': 'p1', 'session_id': self.sessions['dayform'], 'sequence': 1,
+                'type': 'presence.updated', 'state': 'active'}
+        with self.assertRaises(HTTPError) as caught:
+            self.ui('dayform', '/ui/activity', body, origin='https://elsewhere.example')
+        self.assertEqual(caught.exception.code, 403)
+        caught.exception.close()
+        request = Request(self.apps['dayform'].base_url + '/ui/activity', data=json.dumps(body).encode(),
+                          headers={'Content-Type': 'application/json', 'Origin': self.apps['dayform'].base_url})
+        with self.assertRaises(HTTPError) as caught:
+            build_opener().open(request, timeout=3)
+        self.assertEqual(caught.exception.code, 401)
+        caught.exception.close()
+
+    def test_delayed_activity_reads_use_server_lease_age_across_clock_skew(self):
+        from unittest.mock import patch
+        with patch('our_ark_app_sdk.store.time.time', return_value=1000):
+            self.activity('dayform', 'presence', 1, state='active')
+            batch = self.apps['dayform'].activity()
+        batch['server_time'] = 1040  # Five seconds remain when the agent reads it.
+        tracker = self.service.activity
+        tracker.apps = {'dayform': self.apps['dayform']}
+        with patch.object(AppConnection, 'activity', return_value=batch), \
+                patch('ruth.shopping.activity.time.time', return_value=90000):
+            tracker.poll_once()
+            self.assertEqual(tracker.snapshot()['status'], 'active')
+        with patch('ruth.shopping.activity.time.time', return_value=90006):
+            self.assertEqual(tracker.snapshot()['status'], 'unknown')
+        # Even if only first observed after expiry, it must start out unknown.
+        batch['cursor'] += 1
+        batch['events'][0].update(cursor=batch['cursor'], sequence=2)
+        batch['server_time'] = 1050
+        with patch.object(AppConnection, 'activity', return_value=batch), \
+                patch('ruth.shopping.activity.time.time', return_value=90007):
+            tracker.poll_once()
+            self.assertEqual(tracker.snapshot()['status'], 'unknown')
+
     def test_three_surfaces_share_runtime_session_and_message_time_context(self):
         reply = self.kickoff()
         self.assertIn("#connect=browser-dayform", reply)

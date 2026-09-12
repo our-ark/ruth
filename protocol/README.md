@@ -54,8 +54,8 @@ grant permission to take actions or disclose unrelated information.
 The current agent SDK exposes the two directions as `AppEvent.context` from
 `AppClient.events()` and `AgentOutput.shared_context` sent by `AppClient.output()`.
 See its [context exchange example](../libraries/agent-sdk/README.md#context-exchange).
-These are message-bound snapshots and disclosures. Independent context-only
-events or context read/write endpoints are not implemented in this version.
+These core envelopes remain message-bound snapshots and disclosures. The optional
+`context-presence/1` extension below adds independent app context and presence.
 
 ## Current HTTP mapping
 
@@ -138,6 +138,70 @@ mapped to `/products` and `/orders` by the shopping example. They complement
 UAAP; they are not additional core collaboration contracts. Orders in this
 repository are simulated and use their own idempotency keys.
 
+## Optional extension: `context-presence/1`
+
+An app may publish context and presence independently of user messages. Agents
+first read authenticated `GET /collaboration/capabilities`:
+
+```json
+{"extensions": ["context-presence/1"], "presence_ttl_seconds": 45}
+```
+
+An absent extension or a 404 from this endpoint means message-only operation.
+Authentication/transport failures do not mean the extension is unsupported.
+Existing `/collaboration/events` and output semantics remain unchanged. Apps
+opt into activity reporting for their connected user; this does not authorize
+tracking unrelated apps or returning any additional user memory to the app.
+
+`GET /collaboration/activity?after=<cursor>` returns `events`, `cursor`, and
+`server_time` (Unix seconds on the app server). The activity cursor is independent
+of the message cursor. The reference store coalesces updates to the latest event
+per `(session_id, type)`, returning at most 100 in ascending cursor order. Gaps
+are expected: this is a resumable latest-state feed, not an audit log of every
+page visit. Superseded heartbeats need not be processed. Persist updates and the
+cursor together; retries must not renew the same presence observation.
+
+Each activity event includes:
+
+| Field | Meaning |
+| --- | --- |
+| `event_id` | Stable ID for a submitted update. |
+| `app_id`, `session_id` | Origin and app-local session; interpret together. |
+| `type` | `context.updated` or `presence.updated`. |
+| `sequence` | Positive safe integer, strictly increasing per session and type. |
+| `cursor` | App-assigned position in the separate activity feed. |
+| `received_at` | App-server reception time, in Unix seconds. |
+| `context` | Required object for `context.updated`; validated/enriched by the app. |
+| `state`, `expires_at` | Required for `presence.updated`; state is `active` or `inactive`, with an app-server expiry time. |
+
+For example, a context update can identify a newly selected product, while a
+presence update reports that this session currently has a visible, focused page.
+Presence is an observation, not proof of a user's attention or global location.
+Multiple sessions/devices may report active simultaneously. An agent must retain
+that ambiguity, and use **unknown** after expiry instead of inventing a location.
+The demo sends an active heartbeat every 15 seconds and grants a 45-second lease.
+Extension leases must be positive and at most 120 seconds. Use
+`expires_at - server_time` (conservatively allowing for request delay) to compute
+remaining lifetime across machines with different clocks. A stale read never
+makes an expired observation fresh. Context changes alone do not renew presence.
+
+The app backend authenticates and scopes session writes. It rejects conflicting
+reuse of the current sequence, ignores lower sequences, and returns the stored
+result for identical retries without changing reception or expiry time. The demo
+browser stores its sequence across reloads. A new session starts its own sequence.
+The reference adapter supplies authenticated, same-origin `POST /ui/activity` and
+`GET /ui/capabilities` for its optional browser UI; these UI paths are not required
+for custom app integrations. Generic `MessageStore` disables the extension by
+default; the two shopping apps explicitly enable it.
+
+Activity updates do not contain user messages, trigger replies, enter a chat
+transcript, or authorize purchases. They cannot be used as `in_reply_to` targets.
+The agent may include observed activity as separately labeled context on its
+next reasoning turn. It must retain the original message snapshot and route its
+reply to that message's source session, regardless of subsequent activity.
+An app's activity feed and messages must share the same connected-account scope.
+The reference single-account adapter is not a multi-tenant authorization system.
+
 ## Connection lifecycle and implementation scope
 
 The current demo uses one preconnected user and a small static app registry.
@@ -146,15 +210,17 @@ conversation and purchase history. Ruth answers messages in their source
 sessions. Polling continues after an order until `/shop cancel`; the agent's
 conversation persists after polling stops.
 
-This implementation uses message-time snapshots. SSE, presence queues, dynamic
-user tracking, app discovery, and multi-user onboarding are future work. No
+This implementation combines message-time snapshots with optional context/presence
+updates from connected apps. SSE, app discovery, and multi-user onboarding remain
+future work. No
 central UAAP relay is required for this polling example. The broader
 [architecture notes](../docs/app-collaboration.md) discuss possible extensions.
 
 The SDK remains installed as `our-ark-app-sdk` and imported as
 `our_ark_app_sdk`. Its existing `/health` identifier is `our-ark-app/0.1`;
 introducing the UAAP name does not change those identifiers, endpoint paths,
-or payloads. There is no protocol-version negotiation in this prototype.
+or core payloads. Optional extensions are advertised through capabilities; there
+is no general protocol-version negotiation in this prototype.
 
 ## Implementation and walkthrough
 

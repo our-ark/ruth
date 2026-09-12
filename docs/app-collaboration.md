@@ -4,8 +4,9 @@ This describes the broader **One Agent, Anywhere** architecture.
 [UAAP — User–Agent–App Protocol](../protocol/README.md) names its message
 delivery and context exchange contracts. The initial
 [shopping prototype](shopping-demo.md) implements message delivery, context
-exchange and simulated actions with two apps. Activity tracking and SSE below
-remain future work; the prototype uses message-time snapshots and polling.
+exchange and simulated actions with two apps. The optional `context-presence/1`
+extension now tracks app-reported page activity through a separate polling feed.
+Message snapshots remain immutable. SSE and dynamic discovery remain future work.
 
 Applications today integrate their own AI assistants. We explore a different
 future: users bring the same persistent personal agent with them across

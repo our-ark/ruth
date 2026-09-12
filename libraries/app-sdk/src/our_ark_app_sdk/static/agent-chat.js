@@ -1,6 +1,8 @@
 /** App-owned UI for one continuing personal-agent conversation.
  * No model client or agent address. Both stores import this exact module.
  */
+import {ActivityReporter} from "./activity.js";
+
 export class AgentChat extends HTMLElement {
   connectedCallback() {
     if (this.started) return;
@@ -37,7 +39,12 @@ export class AgentChat extends HTMLElement {
     window.addEventListener("hashchange", this.onHashChange);
   }
 
-  disconnectedCallback() { clearTimeout(this.timer); window.removeEventListener("hashchange", this.onHashChange); }
+  disconnectedCallback() {
+    this.connectionGeneration = (this.connectionGeneration || 0) + 1;
+    clearTimeout(this.timer);
+    this.activity?.stop();
+    window.removeEventListener("hashchange", this.onHashChange);
+  }
 
   async request(path, body) {
     const response = await fetch(path, {method: body ? "POST" : "GET", credentials: "same-origin",
@@ -49,7 +56,9 @@ export class AgentChat extends HTMLElement {
   }
 
   async connect() {
+    const generation = this.connectionGeneration = (this.connectionGeneration || 0) + 1;
     clearTimeout(this.timer);
+    this.activity?.stop();
     try {
       const params = new URLSearchParams(location.hash.slice(1));
       const token = params.get("connect");
@@ -67,6 +76,7 @@ export class AgentChat extends HTMLElement {
       sessionStorage.setItem("ark-session", this.sessionId);
       this.status.textContent = "Connected";
       this.poll();
+      this.startActivity(generation);
       return true;
     } catch (error) {
       this.status.textContent = "Not connected";
@@ -74,6 +84,19 @@ export class AgentChat extends HTMLElement {
       return false;
     }
   }
+
+  async startActivity(generation) {
+    try {
+      const capabilities = await this.request("/ui/capabilities");
+      if (!this.isConnected || generation !== this.connectionGeneration ||
+          !capabilities.extensions?.includes("context-presence/1")) return;
+      this.activity = new ActivityReporter({request: (path, body) => this.request(path, body),
+        sessionId: this.sessionId, context: () => this.contextProvider()});
+      this.activity.start();
+    } catch { /* Message-only apps remain usable. */ }
+  }
+
+  contextChanged() { this.activity?.contextChanged(); }
 
   async send(text) {
     text = text.trim();

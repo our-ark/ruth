@@ -583,6 +583,7 @@ class RuthApplication:
         self._conversation_lock = threading.RLock()
         self._shopping = None
         self._shopping_worker = None
+        self._shopping_activity_worker = None
         self._shopping_stop = threading.Event()
         reconcile_extension_schedules(
             {
@@ -651,6 +652,8 @@ class RuthApplication:
             self._shopping_stop.set()
             if self._shopping_worker is not None:
                 self._shopping_worker.join(timeout=6)
+            if self._shopping_activity_worker is not None:
+                self._shopping_activity_worker.join(timeout=6)
             self._stop_cron_scheduler()
 
     def notify_startup(self) -> None:
@@ -1758,6 +1761,27 @@ class RuthApplication:
         if self._shopping_worker is not None:
             return
 
+        def poll_activity():
+            previous_error = ""
+            while not self._shopping_stop.wait(1):
+                try:
+                    self.effect_fence.require_current()
+                    shopping = self._shopping_service()
+                    owner = _allowed_conversation_id(self.client)
+                    errors = shopping.activity.poll_once() if (
+                        shopping and owner is not None and shopping.active_for(owner)) else []
+                    summary = "; ".join(errors)
+                    if summary and summary != previous_error:
+                        print(f"Ruth app activity: {summary}")
+                    previous_error = summary
+                except StaleDaemonEpoch:
+                    return
+                except Exception as error:
+                    summary = str(error)
+                    if summary != previous_error:
+                        print(f"Ruth app activity paused this poll: {summary}")
+                    previous_error = summary
+
         def poll():
             previous_error = ""
             while not self._shopping_stop.wait(1):
@@ -1780,6 +1804,8 @@ class RuthApplication:
                     previous_error = summary
 
         self._shopping_worker = threading.Thread(target=poll, name="ruth-shopping", daemon=True)
+        self._shopping_activity_worker = threading.Thread(target=poll_activity, name="ruth-app-activity", daemon=True)
+        self._shopping_activity_worker.start()
         self._shopping_worker.start()
 
     def _natural_with_session(

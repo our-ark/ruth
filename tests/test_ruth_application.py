@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import threading
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -31,6 +33,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ApplicationCompositionTests(unittest.TestCase):
+    def test_activity_worker_updates_while_conversation_lock_is_held(self):
+        updated = threading.Event()
+        shopping = SimpleNamespace(active_for=lambda owner: owner == 42,
+                                   activity=SimpleNamespace(poll_once=lambda: (updated.set() or [])),
+                                   poll_once=lambda owner: [])
+        bot = SimpleNamespace(_shopping_worker=None, _shopping_activity_worker=None,
+                              _shopping_service=lambda: shopping,
+                              _shopping_stop=threading.Event(), _conversation_lock=threading.Lock(),
+                              effect_fence=SimpleNamespace(require_current=lambda: None),
+                              client=SimpleNamespace(allowed_conversation_id=42))
+        try:
+            with bot._conversation_lock:
+                RuthApplication._start_shopping_worker(bot)
+                self.assertTrue(updated.wait(3), 'activity must not wait for reasoning to finish')
+        finally:
+            bot._shopping_stop.set()
+            for worker in (bot._shopping_worker, bot._shopping_activity_worker):
+                worker.join(3)
+                self.assertFalse(worker.is_alive())
+
     def test_composition_resolves_descendant_owned_startup_components(self) -> None:
         identity = load_identity()
         chat = _Chat()

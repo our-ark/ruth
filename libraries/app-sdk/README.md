@@ -53,7 +53,7 @@ in [SDK tests](../../tests/test_uaap_sdk.py).
 
 ## Headless reference HTTP adapter
 
-For local development, `AppServer` exposes the two agent-facing HTTP operations
+For local development, `AppServer` exposes the core agent-facing HTTP operations
 without a frontend:
 
 ```python
@@ -74,11 +74,33 @@ must provide its own identity/tenant binding. The generic store's event feed
 does not filter multiple accounts, so use a separate account-scoped store/feed
 or implement authenticated account filtering before exposing it to agents.
 
+## Optional context/presence extension
+
+Enable `MessageStore(path, app_id, activity_enabled=True)` to advertise
+`context-presence/1`. Call `store.activity(authenticated_user_id, body)` with
+`event_id`, `session_id`, `type`, `sequence`, and either `context` or `state`.
+A context update uses the same `snapshot_context` validation as message context.
+Presence state is `active` or `inactive`; the server stamps reception and expiry.
+
+`store.activity_events(after)` supplies the independent coalesced feed; map it to
+`GET /collaboration/activity`. `store.capabilities()` supplies capability discovery.
+These operations inherit the same account-scoping requirements as message feeds.
+The additive SQLite table preserves existing messages, sessions and outputs.
+Only the latest update per session/type is retained. Identical retries do not
+renew leases, and lower sequences are ignored. See the
+[protocol](../../protocol/README.md#optional-extension-context-presence1).
+
+The optional browser `ActivityReporter` in `static/activity.js` reports focus,
+visibility, heartbeat and context changes for one authenticated session. Its
+`contextChanged()` hook should be called when relevant app state changes. It
+sends no messages and invokes no models. `<agent-chat>` starts it after connecting
+only when the app advertises support, and exposes the same `contextChanged()` hook.
+
 ## Shopping adapter and optional example UI
 
 `CollaborationStore(path, app_id, catalog)` extends `MessageStore` with the
 existing shopping snapshot/disclosure policy, mock products, and simulated
-orders. The two demo websites use it with `AppServer`, supplying a
+orders, and enables the activity extension. The two demo websites use it with `AppServer`, supplying a
 `connect_token`, `static_dir`, and their own storefront files. Existing routes,
 payloads, databases, and package imports remain compatible.
 

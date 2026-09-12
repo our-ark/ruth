@@ -45,7 +45,7 @@ context round trip is exercised by the [headless notes-app test](../../tests/tes
 
 ## Context exchange
 
-Context exchange currently travels in the same envelopes as message delivery:
+Core context exchange travels in the same envelopes as message delivery:
 
 | Direction | SDK method and field | Example |
 | --- | --- | --- |
@@ -74,10 +74,27 @@ incoming app context or the agent's full memory into `shared_context` automatica
 envelopes. They document the core fields while app adapters may add metadata,
 such as the shopping demo's `share_preferences` permission.
 
-This version has no standalone `get_context`/`set_context` endpoint or context-only
-event. App context arrives with a user message, and user context returns with an
-agent reply. Independent context updates would require an extension on both
-SDKs and the app-hosted protocol. See the [protocol](../../protocol/README.md).
+## Independent context and presence
+
+`capabilities()` discovers optional extensions (404 means a message-only app).
+For `context-presence/1`, `activity(after=activity_cursor)` returns a validated
+`ActivityBatch` of `ActivityEvent` updates and an app-server timestamp. Both types
+are exported by the SDK. Keep this cursor separate from the message cursor.
+
+```python
+if "context-presence/1" in app.capabilities()["extensions"]:
+    batch = app.activity(after=saved_activity_cursor)
+    for event in batch["events"]:
+        update_observed_state(app.app_id, event, batch["server_time"])
+    persist_observed_state_and_cursor(batch["cursor"])
+```
+
+The update/persistence functions are agent-supplied hooks. This feed coalesces
+superseded state; it is not a complete activity history. Treat presence as a
+lease, account for app clock differences using `expires_at - server_time`, and
+keep simultaneous active sessions ambiguous. Activity is separate from message
+snapshots and never grants permission to act. See the
+[extension contract](../../protocol/README.md#optional-extension-context-presence1).
 
 ## Responsibilities
 
@@ -91,8 +108,7 @@ SDKs and the app-hosted protocol. See the [protocol](../../protocol/README.md).
 The client does not automatically retry writes, persist cursors, own conversation
 memory, discover apps, or run an agent. The agent chooses connection/task
 lifetimes and keeps durable IDs and receipts so retries do not create new turns
-or duplicate effects. Polling is the current transport; SSE and presence are
-future extensions.
+or duplicate effects. Polling is the current transport; SSE remains future work.
 
 `request(path, body)` can also call ordinary app APIs. Shopping-specific product
 methods, recommendation photos, ordering policy, Telegram, and `/shop` live in

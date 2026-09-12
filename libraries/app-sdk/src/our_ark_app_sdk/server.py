@@ -25,7 +25,7 @@ class CollaborationStore(MessageStore):
     """Shopping-specific reference adapter retained for the demo applications."""
 
     def __init__(self, path: Path, app_id: str, catalog: list[dict]):
-        super().__init__(path, app_id)
+        super().__init__(path, app_id, activity_enabled=True)
         self.catalog = {identifier(p["id"]): p for p in catalog}
         with self.transaction() as db:
             db.execute("CREATE TABLE IF NOT EXISTS orders(key TEXT PRIMARY KEY, request TEXT NOT NULL, body TEXT NOT NULL)")
@@ -173,6 +173,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 if after < 0:
                     raise APIError(400, "Invalid cursor")
                 return self.send_json(store.events(after))
+            if method == "GET" and path in ("/collaboration/capabilities", "/ui/capabilities"):
+                return self.send_json(store.capabilities())
+            if method == "GET" and path == "/collaboration/activity":
+                return self.send_json(store.activity_events(int(query.get("after", ["0"])[0])))
             match = re.fullmatch(r"/collaboration/sessions/([a-zA-Z0-9_-]+)/outputs", path)
             if method == "POST" and match:
                 return self.send_json(store.output(match[1], body))
@@ -182,6 +186,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 return self.send_json(store.session("demo-account"))
             if method == "POST" and path == "/ui/messages":
                 return self.send_json(store.message("demo-account", body))
+            if method == "POST" and path == "/ui/activity":
+                return self.send_json(store.activity("demo-account", body))
             if method == "GET" and path == "/ui/transcript":
                 return self.send_json(store.transcript("demo-account", query.get("session_id", [""])[0]))
             if method == "GET":

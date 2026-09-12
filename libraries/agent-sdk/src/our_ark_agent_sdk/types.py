@@ -3,7 +3,26 @@
 Context contents belong to the application domain. The SDK defines the envelope;
 the agent and app separately enforce authorization and disclosure policies.
 """
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
+
+
+class ActivityEvent(TypedDict):
+    event_id: str
+    app_id: str
+    session_id: str
+    type: Literal["context.updated", "presence.updated"]
+    sequence: int
+    cursor: int
+    received_at: float
+    context: NotRequired[dict[str, Any]]
+    state: NotRequired[Literal["active", "inactive"]]
+    expires_at: NotRequired[float]
+
+
+class ActivityBatch(TypedDict):
+    events: list[ActivityEvent]
+    cursor: int
+    server_time: float
 
 
 class UserMessage(TypedDict):

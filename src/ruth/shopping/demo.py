@@ -109,6 +109,16 @@ def console(root):
                 print(f"Shopping poll: {error}", flush=True)
     worker = threading.Thread(target=poll, daemon=True)
     worker.start()
+    def poll_activity():
+        while not stop.wait(1):
+            try:
+                if service.active_for("demo-console"):
+                    for error in service.activity.poll_once():
+                        print(f"App activity: {error}")
+            except Exception as error:
+                print(f"App activity poll: {error}")
+    activity_worker = threading.Thread(target=poll_activity, daemon=True)
+    activity_worker.start()
     print("Ruth console uses the configured model, not scripted replies. /quit exits. Use a separate demo root from a live Telegram instance.")
     try:
         while True:
@@ -134,6 +144,7 @@ def console(root):
     finally:
         stop.set()
         worker.join(timeout=6)
+        activity_worker.join(timeout=6)
 
 
 if __name__ == "__main__":

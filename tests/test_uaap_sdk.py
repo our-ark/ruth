@@ -173,6 +173,80 @@ class UAAPSDKTests(unittest.TestCase):
         code = "import sys; import our_ark_agent_sdk, our_ark_app_sdk; assert 'ruth' not in sys.modules"
         subprocess.run([sys.executable, '-S', '-c', code], env=env, cwd=self.temp.name, check=True)
 
+    def test_activity_extension_is_optional_and_backward_compatible(self):
+        self.assertEqual(self.app.capabilities()['extensions'], [])
+        with self.assertRaises(UAAPError) as caught:
+            self.app.activity()
+        self.assertEqual(caught.exception.status_code, 404)
+        with patch.object(AppClient, 'request', side_effect=UAAPError('old app', status_code=404)):
+            self.assertEqual(self.app.capabilities(), {'extensions': []})
+        with patch.object(AppClient, 'request', side_effect=UAAPError('unauthorized', status_code=401)):
+            with self.assertRaises(UAAPError):
+                self.app.capabilities()
+
+    def test_activity_sequence_leases_coalescing_and_message_snapshot(self):
+        self.store.activity_enabled = True
+        self.assertIn('context-presence/1', self.app.capabilities()['extensions'])
+        self.message()
+        context = {'event_id': 'context-1', 'session_id': self.session, 'sequence': 1,
+                   'type': 'context.updated', 'context': {'document_id': 'doc-2'}}
+        self.store.activity('test-user', context)
+        body = {'event_id': 'presence-1', 'session_id': self.session, 'sequence': 1,
+                'type': 'presence.updated', 'state': 'active'}
+        with patch('our_ark_app_sdk.store.time.time', return_value=1000):
+            original = self.store.activity('test-user', body)
+        with patch('our_ark_app_sdk.store.time.time', return_value=1100):
+            self.assertEqual(self.store.activity('test-user', body), original)
+        self.assertEqual(original['event']['expires_at'], 1045, 'retries do not extend a lease')
+        with self.assertRaises(APIError) as caught:
+            self.store.activity('test-user', dict(body, state='inactive'))
+        self.assertEqual(caught.exception.status, 409)
+        for sequence in range(2, 102):
+            self.store.activity('test-user', dict(body, sequence=sequence, event_id=f'p-{sequence}'))
+        self.assertFalse(self.store.activity('test-user', body)['accepted'])
+        batch = self.app.activity()
+        self.assertEqual(len(batch['events']), 2, 'heartbeats coalesce instead of growing a backlog')
+        self.assertEqual(self.app.activity(batch['cursor'])['events'], [])
+        self.assertEqual(self.app.events()['events'][0]['context']['document_id'], 'doc-1')
+        self.assertEqual(len(self.store.transcript('test-user', self.session)['messages']), 1)
+        reopened = NotesStore(self.path, 'notes', activity_enabled=True)
+        self.assertEqual(reopened.activity_events(0)['events'], batch['events'])
+        self.assertFalse(reopened.activity('test-user', body)['accepted'])
+        with self.assertRaises(UAAPError):
+            self.app.output(self.session, {'id': 'bad-reply', 'in_reply_to': 'context-1', 'text': 'No'})
+
+    def test_activity_account_scope_and_validation(self):
+        self.store.activity_enabled = True
+        body = {'event_id': 'p1', 'session_id': self.session, 'sequence': 1,
+                'type': 'presence.updated', 'state': 'active'}
+        with self.assertRaises(APIError) as caught:
+            self.store.activity('someone-else', body)
+        self.assertEqual(caught.exception.status, 404)
+        for fields in ({'sequence': True}, {'sequence': 0}, {'sequence': -1}, {'sequence': 1.5},
+                       {'state': 'maybe'}, {'type': 'message'}, {'event_id': '../bad'},
+                       {'type': 'context.updated', 'context': []}):
+            with self.subTest(fields=fields), self.assertRaises(APIError):
+                self.store.activity('test-user', dict(body, **fields))
+        self.store.activity('test-user', body)
+        with self.assertRaises(UAAPError):
+            replace(self.app, token='wrong').activity()
+        other = self.store.session('someone-else')['session_id']
+        self.store.activity('someone-else', dict(body, session_id=other, state='inactive'))
+        self.assertEqual(len(self.app.activity()['events']), 2)
+
+    def test_activity_sdk_rejects_malformed_and_foreign_events(self):
+        self.store.activity_enabled = True
+        self.store.activity('test-user', {'event_id': 'p1', 'session_id': self.session, 'sequence': 1,
+                                         'type': 'presence.updated', 'state': 'active'})
+        batch = self.app.activity()
+        for fields in ({'app_id': 'another-app'}, {'cursor': True}, {'sequence': 0},
+                       {'expires_at': float('nan')}, {'expires_at': 1e30}, {'state': 'maybe'},
+                       {'type': 'context.updated', 'context': None}):
+            invalid = dict(batch, events=[dict(batch['events'][0], **fields)])
+            with self.subTest(fields=fields), patch.object(AppClient, 'request', return_value=invalid):
+                with self.assertRaises(UAAPError):
+                    self.app.activity()
+
 
 if __name__ == '__main__':
     unittest.main()
