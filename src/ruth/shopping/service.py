@@ -247,10 +247,16 @@ class ShoppingService:
             receipt["delivered"] = True
             self.save(state)
         if receipt.get("order") and not receipt.get("notified"):
-            photo = self._deliver_order_photo(state, receipt, task["chat_id"], self.send_photos)
-            if not photo.delivered and not self.notify(task["chat_id"], self._order_text(receipt["order"]), "shopping-" + key):
-                raise ShoppingError("Order completed; Telegram notification is waiting to retry")
+            # The full mirrored turn below also supplies the text fallback.
+            self._deliver_order_photo(state, receipt, task["chat_id"], self.send_photos)
             receipt["notified"] = True
+            self.save(state)
+        if not receipt.get("mirrored"):
+            transcript = (f"[{app.name} · Website · product {event['context']['product_id']}]\n\n"
+                          f"You:\n{event['message']['text']}\n\nRuth:\n{output['text']}")
+            if not self.notify(task["chat_id"], transcript, "shopping-transcript-" + key):
+                raise ShoppingError("Website reply delivered; Telegram chat history is waiting to retry")
+            receipt["mirrored"] = True
             self.save(state)
         if not receipt.get("recorded"):
             self.record(task["chat_id"], f"[{app.name}; product {event['context']['product_id']}] {event['message']['text']}", output["text"])

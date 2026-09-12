@@ -124,6 +124,40 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.brain.calls), calls)
         self.assertEqual(self.kickoff(), reply, "redelivery of /shop must reuse its answer")
 
+    def test_website_transcripts_include_both_speakers_and_source_once(self):
+        self.kickoff()
+        self.message("dayform", "day-one", "这双适合通勤吗？")
+        self.message("stride", "arc-02", "Compare with DAYFORM.")
+        self.assertEqual(self.service.poll_once(42), [])
+        self.assertEqual(len(self.notifications), 2)
+        for (chat, text, key), app, question in zip(self.notifications,
+                ("dayform", "stride"), ("这双适合通勤吗？", "Compare with DAYFORM.")):
+            self.assertEqual(chat, 42)
+            self.assertIn(f"[{app} · Website", text)
+            self.assertIn("You:\n" + question, text)
+            self.assertIn("Ruth:\n" + self.transcript(app)["outputs"][0]["text"], text)
+            self.assertTrue(key.startswith("shopping-transcript-app-"))
+        self.assertEqual(self.new_service().poll_once(42), [])
+        self.assertEqual(len(self.notifications), 2)
+
+    def test_transcript_failure_retries_same_text_and_key_after_restart(self):
+        self.kickoff()
+        self.message("dayform", "day-one")
+        attempts = []
+        def unavailable(*args):
+            attempts.append(args)
+            return False
+        self.assertTrue(self.new_service(notify=unavailable).poll_once(42))
+        self.assertEqual(len(self.transcript("dayform")["outputs"]), 1)
+        calls = len(self.brain.calls)
+        self.assertEqual(self.service.load()["cursors"].get("dayform", 0), 0)
+        self.assertEqual(self.new_service().poll_once(42), [])
+        self.assertEqual(len(self.brain.calls), calls)
+        self.assertEqual(self.notifications, attempts)
+        self.assertEqual(len(self.transcript("dayform")["outputs"]), 1)
+        self.assertEqual(self.new_service().poll_once(42), [])
+        self.assertEqual(len(self.notifications), 1)
+
     def test_reply_retry_uses_durable_output_not_a_second_model_turn(self):
         self.kickoff()
         self.message("dayform", "day-one")
@@ -200,7 +234,7 @@ class ShoppingIntegrationTests(unittest.TestCase):
         self.assertTrue(self.new_service().active_for(42), "restart must preserve the connection")
         self.service.telegram(42, "Thanks. Show me the options again.", "post-order")
         self.assertEqual({key for key, _ in self.brain.calls}, {"telegram:42"})
-        self.assertEqual(len(self.notifications), 1, "follow-ups must not repeat the order notification")
+        self.assertEqual(len(self.notifications), 3, "each website turn is mirrored, including follow-ups")
         with self.servers["dayform"].store.transaction() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM orders").fetchone()[0], 1)
         self.service.command(42, "telegram:42", "cancel", "done")
@@ -297,7 +331,7 @@ class ShoppingIntegrationTests(unittest.TestCase):
         order = next(r["order"] for r in service.load()["receipts"].values() if "order" in r)
         for fact in (order["order_id"], "Day One Lite / Ink", "US 9", "$85.80", "No payment was taken."):
             self.assertIn(fact, caption)
-        self.assertEqual(self.notifications, [], "photo caption replaces a separate text confirmation")
+        self.assertEqual(len(self.notifications), 1, "website transcript accompanies the order photo")
         self.assertTrue(service.active_for(42))
         self.assertEqual(len(self.transcript("dayform")["outputs"]), 1)
         with self.servers["dayform"].store.transaction() as db:
@@ -480,7 +514,8 @@ class ShoppingIntegrationTests(unittest.TestCase):
         chat = Chat()
         photos = []
         def send_photos(token, chat_id, images, caption):
-            self.assertFalse(chat.sent, "an album replaces the separate text recommendation")
+            self.assertTrue(all("· Website" in text for _, text in chat.sent),
+                            "albums replace Telegram recommendations; website turns are mirrored")
             photos.append((chat_id, images, caption))
             return {"message_ids": [len(photos) * 2, len(photos) * 2 + 1], "media_group_id": f"album-{len(photos)}"}
         with patch("ruth.app.core.ensure_long_term_memory"), patch("ruth.app.core.RuthApplication._maybe_start_lineage_worker"), \
@@ -498,18 +533,18 @@ class ShoppingIntegrationTests(unittest.TestCase):
             bot.handle_event(ChatEvent(cursor="2", conversation_id=42, message_id="2", text="Comfort matters most."))
             self.assertEqual({key for key, _ in brain.calls}, {"telegram:42"})
             self.assertEqual(len(brain.calls), 3)
-            self.assertEqual(len(chat.sent), 0, "albums replace Telegram text; app replies stay in the app")
+            self.assertEqual(len(chat.sent), 1, "website conversation is mirrored to Telegram")
             self.assertEqual(len(photos), 2, "each Telegram recommendation turn produces one album")
             self.assertEqual(len(self.transcript("dayform")["outputs"]), 1)
             sender.side_effect = ShoppingError("Unknown album delivery outcome")
             third = ChatEvent(cursor="3", conversation_id=42, message_id="3", text="Show them again.")
             bot.handle_event(third)
-            self.assertEqual(len(chat.sent), 1, "failed album falls back to one full text recommendation")
-            self.assertIn("Two options", chat.sent[0][1])
-            self.assertIn("#connect=browser-dayform", chat.sent[0][1])
+            self.assertEqual(len(chat.sent), 2, "failed album falls back to one full text recommendation")
+            self.assertIn("Two options", chat.sent[-1][1])
+            self.assertIn("#connect=browser-dayform", chat.sent[-1][1])
             bot.handle_event(third)
             self.assertEqual(sender.call_count, 3, "ambiguous uploads must not replay")
-            self.assertEqual(len(chat.sent), 1)
+            self.assertEqual(len(chat.sent), 2)
             sender.side_effect = None
             sender.return_value = {"message_ids": [36], "media_group_id": None}
             self.message("dayform", "day-one-lite", "Please place a simulated order in US 9, up to $120 total.")
@@ -518,14 +553,14 @@ class ShoppingIntegrationTests(unittest.TestCase):
             self.assertEqual(sender.call_count, 4)
             self.assertEqual(len(sender.call_args.args[2]), 1)
             self.assertIn("$85.80", sender.call_args.args[3])
-            self.assertEqual(len(chat.sent), 1, "web order photo replaces text notification")
+            self.assertEqual(len(chat.sent), 3, "web order includes a complete mirrored conversation")
             bot.handle_event(ChatEvent(cursor="4", conversation_id=42, message_id="4", text="/shop shoes"))
             order_event = ChatEvent(cursor="5", conversation_id=42, message_id="5",
                                    text="Please place a simulated order for Day One Lite, US 9, up to $120 total.")
             bot.handle_event(order_event)
             self.assertEqual(sender.call_count, 6)
             self.assertIn("$85.80", sender.call_args.args[3])
-            self.assertEqual(len(chat.sent), 1, "Telegram order photo replaces text reply")
+            self.assertEqual(len(chat.sent), 3, "Telegram order photo replaces text reply")
             bot.handle_event(order_event)
             self.assertEqual(sender.call_count, 6, "acknowledged order photo must not repeat")
 

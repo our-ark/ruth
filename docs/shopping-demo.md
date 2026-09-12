@@ -56,8 +56,8 @@ service. Console notifications print in the terminal. Its session is
 4. In STRIDE: “How does this compare with the first pair?”
 5. Return to DAYFORM. Choose a size and say “Place a simulated order for this
    pair in US 9, quantity 1, up to $120 total,” or use **Ask Ruth to order**.
-6. The source chat receives the result; the console receives an order
-   notification. Ruth continues listening for follow-up questions in both stores.
+6. The source chat receives the result; the console receives the full website
+   conversation turn (your message and Ruth’s reply). Ruth continues listening for follow-up questions in both stores.
    `/shop cancel` stops polling;
    `/shop status` reports whether it is active.
 
@@ -82,8 +82,12 @@ bin/ruth-shopping-demo serve
 
 Then start/restart that instance's normal `bin/ruth-daemon`. Send `/shop ...`
 to its Telegram bot. The app turns reuse **that exact `telegram:<chat-id>`
-runtime session**, including previous Telegram conversation. Order notifications
-use Ruth's existing durable notification service. The app worker polls while
+runtime session**, including previous Telegram conversation. Every new website
+turn is also mirrored to the locked Telegram conversation, labeled with the store
+and product, followed by **You** and **Ruth** with their complete messages. The
+mirror uses Ruth's existing durable notification service; retries reuse the same
+notification key without repeating reasoning or website output. Telegram turns
+are already present in that chat and are not mirrored again. The app worker polls while
 Telegram's long poll is waiting; a shared lock serializes reasoning turns.
 
 Telegram recommendations appear as one photo album with one shared caption,
@@ -97,7 +101,8 @@ in Ruth's conversation; successful albums do not generate a separate text messag
 
 Order confirmations use one product photo with the order number, product, size,
 confirmed total and simulated-payment notice in its caption. This applies both
-to orders placed through a web app and through Telegram. The ordered product's
+to orders placed through a web app and through Telegram. Web orders also include
+the full mirrored conversation turn so the user’s original request is retained. The ordered product's
 app supplies the image; all receipt details come from the confirmed order, even
 if the catalog changes later. A durable order-photo receipt prevents repeated
 uploads on replay. Missing images, oversized captions or uncertain photo delivery
