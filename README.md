@@ -19,6 +19,43 @@ runtime. Start with the [UAAP protocol](protocol/README.md),
 [two SDKs](libraries/README.md), or
 [runnable walkthrough](docs/shopping-demo.md).
 
+## Demo video
+
+[![Watch Ruth — One Agent, Anywhere on YouTube](https://img.youtube.com/vi/onO0yoVqc_s/hqdefault.jpg)](https://www.youtube.com/watch?v=onO0yoVqc_s)
+
+**[Watch the two-minute animated demo on YouTube](https://www.youtube.com/watch?v=onO0yoVqc_s).**
+
+Follow a Tokyo trip across **Airside**, **Staywell**, and **Daylight**, using the
+[OneAgent travel sample apps](https://github.com/our-ark/oneagent/tree/main/examples/travel).
+The video shows conversation and context continuity across apps, website
+exchanges collected in Telegram, and an introduction to the One Agent, Anywhere
+architecture and paper.
+
+The video is an animated walkthrough with Ruth as the personal agent. The
+runnable integration in this repository is the
+[DAYFORM and STRIDE shopping demo](docs/shopping-demo.md).
+
+## Current capabilities
+
+The DAYFORM and STRIDE shopping demo supports:
+
+- **Website conversations in Telegram.** With Telegram configured, every new
+  website question and Ruth reply also appear in the same Telegram chat, labeled
+  with the store and product. Website turns reuse Ruth's existing conversation
+  context. Earlier website conversations are not backfilled.
+- **Current app and page awareness.** Connected apps report page/product context
+  and foreground presence without requiring another chat message. `/shop status`
+  shows the observed app and product, or reports ambiguous or unknown presence.
+- **Telegram updates when you switch apps.** Ruth announces the first stable app
+  arrival and subsequent switches, such as DAYFORM → STRIDE STUDIO, including the
+  viewed product when known. Brief focus changes are debounced; heartbeats and
+  product changes within the same app do not trigger extra announcements.
+
+App awareness runs during an active `/shop` task and covers only connected app
+sessions. Stale presence expires to unknown; `/shop cancel` stops polling and
+app-switch announcements. See the [walkthrough](docs/shopping-demo.md) for setup
+and examples.
+
 ## UAAP in this repository
 
 **One Agent, Anywhere** is the vision; **UAAP** defines the collaboration
@@ -92,10 +129,14 @@ The prototype focuses on message delivery and bidirectional context exchange.
 Ruth polls two registered apps during an active shopping task. Each message
 carries its page/product snapshot, and each answer goes back to its source
 session. Ordinary product APIs support search, details and simulated orders.
-Connected apps can also report page context and focused-session presence through
-the optional UAAP `context-presence/1` extension. `/shop status` shows Ruth's
-current observation; stable app changes also produce brief Telegram updates.
-Stale presence expires to unknown. No public inbound Ruth
+
+The optional UAAP
+[`context-presence/1` extension](protocol/README.md#optional-extension-context-presence1)
+adds a separate activity feed for page context and focused-session presence.
+Ruth processes it independently of message reasoning, so observations can update
+while a model turn is running. The feed retains the latest context and presence
+per session, rather than a complete browsing history. Apps can adopt the
+extension without changing the core message flow. No public inbound Ruth
 endpoint is required.
 
 All code is in this repository: `libraries/agent-sdk`, `libraries/app-sdk`,
