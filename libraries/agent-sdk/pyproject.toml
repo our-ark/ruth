@@ -2,9 +2,15 @@
 name = "our-ark-agent-sdk"
 version = "0.1.0"
 description = "UAAP agent SDK for connecting personal agents to application-hosted interfaces"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/our-ark/ruth"
+Documentation = "https://github.com/our-ark/ruth/tree/main/libraries/agent-sdk"
 
 [build-system]
 requires = ["setuptools>=77"]

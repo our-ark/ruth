@@ -48,6 +48,9 @@ and Doctor-selected test environment supplies them.
 
 ## Validation
 
+These are historical bootstrap results from September 6, 2026. Current
+collaboration checks are recorded in [prototype validation](shopping-validation.md).
+
 - Genesis: 39 tests passed, including the new descendant-order regression.
 - Ruth: Genesis accepted both inherited pre-birth validation gates, using
   Python 3.13 and `python -m unittest discover -s tests -t .`.
@@ -58,5 +61,6 @@ and Doctor-selected test environment supplies them.
   forge, clean worktree, and private-state storage checks all passed. Runtime
   and test environments also passed `pip check`.
 
-The application collaboration protocol remains planned work. These checks
-validate the inherited agent foundation, not cross-application interoperability.
+Application collaboration was planned work at bootstrap time. These checks
+validated the inherited agent foundation. The repository now includes UAAP,
+both SDKs, and the [runnable shopping integration](shopping-demo.md).

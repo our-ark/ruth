@@ -2,9 +2,15 @@
 name = "our-ark-app-sdk"
 version = "0.1.0"
 description = "UAAP reference app SDK for personal-agent message delivery and context exchange"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/our-ark/ruth"
+Documentation = "https://github.com/our-ark/ruth/tree/main/libraries/app-sdk"
 
 [build-system]
 requires = ["setuptools>=77"]

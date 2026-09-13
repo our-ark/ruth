@@ -132,6 +132,8 @@ class RuthFeedbackEvidenceTests(unittest.TestCase):
                 ROOT / "libraries",
                 ROOT / "src",
                 ROOT / "tests",
+                ROOT / "release_tests",
+                ROOT / "scripts",
             )
             if path.exists()
         )

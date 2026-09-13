@@ -1,4 +1,8 @@
 .ruth/
+.venv/
+.env
+.env.*
+!.env.example
 .agent/instance.yaml
 .agent/lineage_inbox.json
 __pycache__/

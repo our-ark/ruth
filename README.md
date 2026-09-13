@@ -89,6 +89,7 @@ bin/ruth status
 bin/ruth init --instance local --worktree ../ruth-local
 cd ../ruth-local
 bin/ruth status
+bin/ruth state migrate
 bin/ruth state validate
 ```
 
@@ -97,6 +98,10 @@ The source checkout stays on `main`. The instance uses its own
 metadata lives in `.agent/instance.yaml`. Credentials, memory, logs, runtime
 dependencies, and personal identity are never inherited from Enoch or
 committed to this repository.
+
+`state migrate` initializes the private-state manifest for a new instance. For
+an existing instance, `bin/ruth state migrate --dry-run` previews changes;
+migration preserves backups of files it updates.
 
 `bin/ruth` opens the administrative CLI. Conversation uses a configured chat
 provider; creating an instance does not start a daemon or contact a user.
@@ -107,7 +112,7 @@ From the instance directory, install the inherited reference providers in a
 private virtual environment:
 
 ```bash
-python3.13 -m venv .ruth/venv
+python3 -m venv .ruth/venv
 .ruth/venv/bin/python -m pip install -e '.[reference]'
 export RUTH_PYTHON="$PWD/.ruth/venv/bin/python"
 bin/ruth config provider chat telegram
@@ -160,4 +165,18 @@ through the instance's configured Telegram bot. See the broader
 - Parent and birth revisions: [`.agent/lineage.yaml`](.agent/lineage.yaml).
 - Creation details and validation: [bootstrap notes](docs/bootstrap.md).
 
-The inherited body retains its Apache-2.0 license. This repository is private.
+Ruth and both UAAP SDKs use the [Apache-2.0 license](LICENSE). Each SDK
+distribution includes the license text.
+
+## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for an isolated setup and the same Python,
+JavaScript, and package-install checks used in CI. Tests use synthetic data and
+mock providers; they do not require a Telegram token or a model subscription.
+The [validation notes](docs/shopping-validation.md) distinguish automated checks
+from historical live demonstrations.
+
+This is a research prototype. The reference app server is intended for local,
+single-account use, and all shopping orders are simulated. See the
+[SDK deployment boundary](libraries/app-sdk/README.md) before adapting it to a
+hosted service.

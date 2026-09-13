@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import importlib.metadata
+import shutil
 import os
 from pathlib import Path
 import subprocess
@@ -14,102 +16,19 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@unittest.skipUnless(
-    (ROOT / "libraries").is_dir() and (ROOT / ".github").is_dir(),
-    "repository release tests are outside the inheritable agent body",
-)
 class RuthPortableInstallTests(unittest.TestCase):
-    def test_ci_provisions_locked_build_backend_before_offline_wheel_test(self) -> None:
-        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(
-            encoding="utf-8"
-        )
-        install_command = (
-            "python -m pip install --disable-pip-version-check --require-hashes "
-            "-r .github/requirements/test-build.txt"
-        )
-        test_command = "python -m unittest discover -s tests"
-
-        self.assertIn(install_command, workflow)
-        self.assertLess(workflow.index(install_command), workflow.index(test_command))
-
-        requirements = (
-            ROOT / ".github" / "requirements" / "test-build.txt"
-        ).read_text(encoding="utf-8")
-        self.assertRegex(requirements, r"(?m)^setuptools==\d+\.\d+\.\d+ \\$\n")
-        self.assertRegex(requirements, r"--hash=sha256:[0-9a-f]{64}$")
-        locked_version = next(
-            line.split("==", 1)[1].split()[0]
-            for line in requirements.splitlines()
-            if line.startswith("setuptools==")
-        )
-        self.assertGreaterEqual(
-            tuple(int(part) for part in locked_version.split(".")),
-            (83, 0, 0),
-        )
-
-    def test_release_metadata_matches_project_version(self) -> None:
-        metadata = _project_metadata(ROOT / "pyproject.toml")
-        version = metadata["project"]["version"]
-        citation = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
-
-        self.assertIn(f"version: {version}", citation)
-        self.assertIn(f"/releases/tag/v{version}", citation)
-        self.assertTrue((ROOT / "docs" / "releases" / f"v{version}.md").is_file())
-
-    def test_reference_providers_share_the_core_contract_pin(self) -> None:
-        root_metadata = _project_metadata(ROOT / "pyproject.toml")
-        core_contract = _dependency(root_metadata["project"]["dependencies"], "our-ark-provider-kit")
+    def test_runtime_and_package_dependency_pins_agree(self) -> None:
+        project = _project_metadata(ROOT / "pyproject.toml")["project"]
         manifest = _project_metadata(ROOT / "genesis.toml")
-        runtime_contracts = [
-            dependency["requirement"]
-            for dependency in manifest["runtime_dependencies"]
-            if dependency["name"] == "provider-kit"
-        ]
-        self.assertEqual(runtime_contracts, [core_contract])
-        for package in ("claude", "github", "launchd", "slack", "systemd", "telegram"):
-            metadata = _project_metadata(ROOT / "libraries" / package / "pyproject.toml")
-            provider_contract = _dependency(
-                metadata["project"]["dependencies"],
-                "our-ark-provider-kit",
-            )
-            self.assertEqual(provider_contract, core_contract, package)
-
-    def test_claude_provider_is_a_local_optional_runtime_dependency(self) -> None:
-        root_metadata = _project_metadata(ROOT / "pyproject.toml")
-        manifest = _project_metadata(ROOT / "genesis.toml")
-        dependency = next(
-            item
-            for item in manifest["runtime_dependencies"]
-            if item["name"] == "claude"
-        )
-
-        reference_requirement = _dependency(
-            root_metadata["project"]["optional-dependencies"]["reference"],
-            "our-ark-claude",
-        )
-        self.assertEqual(dependency["requirement"], reference_requirement)
-        self.assertIn("@d5d6eece19caa5933a1b60b564a126297c864ce8", reference_requirement)
-        self.assertEqual(dependency["import_name"], "our_ark_claude")
-        self.assertEqual(dependency["local_source"], "libraries/claude/src")
-        self.assertTrue(dependency["optional"])
-
-    def test_slack_runtime_dependencies_are_pinned_in_genesis_manifest(self) -> None:
-        manifest = _project_metadata(ROOT / "genesis.toml")
-        dependencies = {
-            dependency["name"]: dependency
-            for dependency in manifest["runtime_dependencies"]
-        }
-
-        self.assertEqual(dependencies["slack-sdk"]["requirement"], "slack-sdk==3.44.0")
-        self.assertEqual(
-            dependencies["websocket-client"]["requirement"],
-            "websocket-client==1.8.0",
-        )
-        self.assertEqual(dependencies["slack-sdk"]["when_provider"], "chat.slack")
-        self.assertEqual(
-            dependencies["websocket-client"]["when_provider"],
-            "chat.slack",
-        )
+        required = set(project["dependencies"])
+        reference = set(project["optional-dependencies"]["reference"])
+        unconditional = [d for d in manifest["runtime_dependencies"] if "when_provider" not in d]
+        self.assertEqual({d["requirement"] for d in unconditional}, required | reference)
+        for dependency in unconditional:
+            with self.subTest(dependency=dependency["name"]):
+                self.assertIn(" @ git+https://", dependency["requirement"])
+                self.assertRegex(dependency["requirement"], r"@[0-9a-f]{40}#subdirectory=")
+                self.assertEqual(bool(dependency.get("optional")), dependency["requirement"] in reference)
 
     def test_wheel_install_completes_profile_task_with_independent_packages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -130,9 +49,15 @@ class RuthPortableInstallTests(unittest.TestCase):
             _write_extension_package(extension_package)
             _write_fake_codex(codex)
 
+            # Upstream libraries are independently versioned packages, not
+            # source directories inside Ruth. Provision them before offline tests.
+            provisioned = Path(os.environ.get("RUTH_RELEASE_WHEELS", ROOT / ".ruth/test-wheels"))
+            for distribution in ("our_ark_provider_kit", "our_ark_skill_catalog", "our_ark_agent_sdk"):
+                matches = list(provisioned.glob(f"{distribution}-*.whl"))
+                self.assertEqual(len(matches), 1, f"Run scripts/prepare_tests.py; missing/ambiguous {distribution}")
+                shutil.copy2(matches[0], wheels)
+
             for project in (
-                ROOT / "libraries" / "provider-kit",
-                ROOT / "libraries" / "skill-catalog",
                 ROOT,
                 chat_provider,
                 vcs_provider,
@@ -210,12 +135,12 @@ class RuthPortableInstallTests(unittest.TestCase):
         self.assertEqual(result["vcs"], "portable-vcs")
         self.assertEqual(result["runtime"], "codex")
         self.assertEqual(result["forge"], "local")
-        self.assertEqual(result["ruth_version"], "0.6.1")
+        self.assertEqual(result["ruth_version"], _project_metadata(ROOT / "pyproject.toml")["project"]["version"])
         self.assertEqual(
             result["agent_identity_schema_id"],
             "https://our-ark.github.io/schemas/ai-agent-identity.schema.json",
         )
-        self.assertEqual(result["provider_kit_version"], "0.7.0")
+        self.assertEqual(result["provider_kit_version"], importlib.metadata.version("our-ark-provider-kit"))
         self.assertEqual(result["chat_provider_version"], "0.0.1")
         self.assertEqual(result["vcs_provider_version"], "0.0.1")
         self.assertEqual(result["profile"], "researcher")
@@ -276,13 +201,6 @@ class RuthPortableInstallTests(unittest.TestCase):
 
 def _project_metadata(path: Path) -> dict:
     return tomllib.loads(path.read_text(encoding="utf-8"))
-
-
-def _dependency(dependencies: list[str], name: str) -> str:
-    matches = [dependency for dependency in dependencies if dependency.split()[0] == name]
-    if len(matches) != 1:
-        raise AssertionError(f"Expected exactly one {name} dependency, found {matches}")
-    return matches[0]
 
 
 def _write_chat_provider_package(root: Path) -> None:

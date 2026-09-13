@@ -1,9 +1,36 @@
-# Prototype validation — 2026-09-10
+# Prototype validation
 
 This is an implementation check, not an empirical evaluation of the paper's
 architecture hypothesis.
 
-## Real-runtime manual walkthrough
+## Release and regression checks — 2026-09-13
+
+On macOS with Python 3.12, a fresh virtual environment built the current Ruth
+and both SDKs plus pinned upstream packages using `scripts/prepare_tests.py`.
+`pip check` passed. `scripts/test.py` then completed:
+
+- **890 agent/UAAP tests:** 889 passed, one inherited check skipped because it
+  inspects the upstream Telegram vision library's source-only lineage metadata.
+- **Four release tests, all passed:** dependency-manifest parity; an installed
+  Ruth task using independent provider/profile/extension packages; SDK license,
+  metadata, and static-asset packaging; and an isolated installed-SDK HTTP round
+  trip for messages, bidirectional context, replay, and presence without Ruth.
+- **Two Node harnesses, both passed:** activity focus, visibility, heartbeat,
+  context retry, reload, and cleanup; repeat-order controls, pending requests,
+  reminders, and product/size isolation.
+
+The agent tests include independent activity processing, expiring and ambiguous
+presence, debounced app-switch announcements, and mirroring website questions
+and replies into Telegram. Chat transports and reasoning are mocked; these
+results do not claim a new live Telegram or model evaluation.
+
+The release tests now run separately from the inheritable agent body. They use
+the independently packaged upstream libraries instead of assuming Enoch's
+library source directories exist inside Ruth. The same commands are configured
+in [CI](../.github/workflows/tests.yml) for Linux and macOS; see
+[CONTRIBUTING.md](../CONTRIBUTING.md) to reproduce them.
+
+## Real-runtime manual walkthrough — 2026-09-10
 
 Executed with Ruth's configured Codex runtime, two local HTTP app servers,
 real browser chat components, and isolated demo state. Console input/output
@@ -46,6 +73,10 @@ limits, source-app image restrictions, and replay protection. The command-dispat
 test verifies that a successful album replaces the separate text recommendation,
 that a failed album falls back to text once, and that app replies stay in the app.
 The automated Telegram transport is mocked; it does not establish live delivery.
+
+These photo-update results predate website-to-Telegram mirroring. The current
+implementation also mirrors new website questions and Ruth replies to Telegram;
+the September 13 regression checks above cover this newer behavior.
 
 A live check consolidated the latest saved recommendation (Day One, Arc 01 and
 Day One Lite) through the same album delivery path. A single sendMediaGroup upload
